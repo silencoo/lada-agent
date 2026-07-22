@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LADA Agent Login</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #fff7fa;
+            --panel: #ffffff;
+            --field: #fff1f6;
+            --border: #f0d9e3;
+            --text: #38232d;
+            --muted: #806b75;
+            --accent: #d94f87;
+            --accent-dark: #b83b70;
+            --accent-soft: #fde5ef;
+            --danger: #c84766;
+            --shadow: 0 24px 70px rgba(112, 43, 72, 0.12);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            min-height: 100dvh;
+            margin: 0;
+            display: grid;
+            place-items: center;
+            background-color: var(--bg);
+            background-image:
+                linear-gradient(110deg, rgba(255, 249, 251, 0.76), rgba(255, 246, 250, 0.62)),
+                url("{{ url_for('static', filename='assets/restoration-bg-v1.png') }}");
+            background-position: center;
+            background-size: cover;
+            color: var(--text);
+            font-family: "DM Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        main {
+            width: min(440px, calc(100vw - 32px));
+            padding: 34px;
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            background: rgba(255, 255, 255, 0.84);
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(22px) saturate(1.08);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 28px;
+        }
+
+        .brand-mark {
+            width: 44px;
+            height: 44px;
+            display: grid;
+            place-items: center;
+            border-radius: 14px;
+            background: linear-gradient(145deg, #e56d9d, #b83b70);
+            color: #ffffff;
+            font-weight: 800;
+            letter-spacing: -0.04em;
+            box-shadow: 0 10px 24px rgba(184, 59, 112, 0.22);
+        }
+
+        .brand strong,
+        .brand span {
+            display: block;
+        }
+
+        .brand strong {
+            font-size: 1.05rem;
+            letter-spacing: 0.05em;
+        }
+
+        .brand span {
+            margin-top: 2px;
+            color: var(--muted);
+            font-size: 0.75rem;
+        }
+
+        .eyebrow {
+            margin-bottom: 7px;
+            color: var(--accent);
+            font-size: 0.68rem;
+            font-weight: 800;
+            letter-spacing: 0.13em;
+        }
+
+        h1 {
+            margin: 0 0 9px;
+            font-size: 1.85rem;
+            letter-spacing: -0.04em;
+        }
+
+        .intro {
+            margin: 0 0 26px;
+            color: var(--muted);
+            line-height: 1.55;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--text);
+            font-size: 0.82rem;
+            font-weight: 700;
+        }
+
+        input {
+            width: 100%;
+            height: 46px;
+            padding: 0 13px;
+            border: 1px solid var(--border);
+            border-radius: 11px;
+            background: var(--field);
+            color: var(--text);
+            font: inherit;
+        }
+
+        input:focus-visible,
+        button:focus-visible {
+            outline: 3px solid rgba(217, 79, 135, 0.18);
+            outline-offset: 1px;
+        }
+
+        input:focus-visible {
+            border-color: var(--accent);
+        }
+
+        button {
+            width: 100%;
+            height: 46px;
+            margin-top: 18px;
+            padding: 0 16px;
+            border: 0;
+            border-radius: 11px;
+            background: linear-gradient(135deg, #d94f87, #bd3f73);
+            color: #ffffff;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.15s ease, transform 0.15s ease;
+        }
+
+        button:hover {
+            background: linear-gradient(135deg, #ca4279, #aa2f64);
+        }
+
+        button:active {
+            transform: scale(0.985);
+        }
+
+        .error {
+            margin-top: 14px;
+            padding: 10px 12px;
+            border: 1px solid #f1c8d3;
+            border-radius: 10px;
+            color: var(--danger);
+            background: #fff0f3;
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 480px) {
+            main {
+                padding: 26px 22px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <main>
+        <div class="brand"><div class="brand-mark">LA</div><div><strong>LADA</strong><span>Restoration agent</span></div></div>
+        <div class="eyebrow">SECURE ACCESS</div>
+        <h1>欢迎回来</h1>
+        <p class="intro">输入访问令牌以进入 LADA 控制台。</p>
+        <form method="post" action="/login">
+            <label for="token">访问令牌</label>
+            <input id="token" name="token" type="password" autocomplete="current-password" required autofocus>
+            <button type="submit">进入控制台</button>
+            {% if error %}
+            <div class="error">{{ error }}</div>
+            {% endif %}
+        </form>
+    </main>
+</body>
+
+</html>

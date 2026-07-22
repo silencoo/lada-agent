@@ -1,0 +1,63 @@
+> ⚠️ 以下文本是仓库内 LADA CLI `0.10.1` 的 `lada-cli.exe --help` 在 2026-07-16 抓取的输出快照。
+> 它**不是本项目(`lada-agent`)的文档**,仅供对照 lada-agent 配置文件项与
+> 底层 CLI 选项之间的关系。要看 lada-agent 自己的用法,请见 [`../usage.md`](../usage.md)。
+
+---
+
+usage: lada-cli.exe [options]
+
+Restore pixelated adult videos (JAV)
+
+General:
+  --input INPUT         Path to pixelated video file or directory containing video files
+  --output OUTPUT       Path used to save output file(s). If path is a directory then file name will be chosen automatically (see
+                        --output-file-pattern). If no output path was given then the directory of the input file will be used
+  --temporary-directory TEMPORARY_DIRECTORY
+                        Directory for temporary video files during restoration process
+  --output-file-pattern OUTPUT_FILE_PATTERN
+                        Pattern used to determine output file name(s). Must include '{orig_file_name}'
+  --device DEVICE       Device used for running Restoration and Detection models. Use "cpu" or "cuda". If you have multiple GPUs you
+                        can select a specific one via index e.g. "cuda:0" (default: cuda:0)
+  --fp16, --no-fp16     Reduce VRAM usage (default: True)
+  --list-devices        List available devices and exit
+  --version             Display version and exit
+  --help                Show this help message and exit
+
+Export:
+  --encoding-preset ENCODING_PRESET
+                        Select encoding preset by name (default: hevc-nvidia-gpu-hq)
+  --list-encoding-presets
+  --encoder ENCODER     Select video encoder by name
+  --list-encoders
+  --encoder-options ENCODER_OPTIONS
+                        Space-separated encoder options
+  --list-encoder-options ENCODER
+  --mp4-fast-start, --no-mp4-fast-start
+                        Allow playing MP4 while it is being written (default: False)
+
+Mosaic Restoration:
+  --mosaic-restoration-model MOSAIC_RESTORATION_MODEL
+                        Name of restoration model or path to weights (default: basicvsrpp-v1.2)
+  --list-mosaic-restoration-models
+                        List available restoration models
+  --mosaic-restoration-config-path MOSAIC_RESTORATION_CONFIG_PATH
+                        Path to restoration model configuration file
+  --max-clip-length MAX_CLIP_LENGTH
+                        Maximum number of frames for restoration. Higher values improve temporal stability. Lower values reduce memory
+                        footprint. If set too low flickering could appear (default: 180)
+
+Mosaic Detection:
+  --mosaic-detection-model MOSAIC_DETECTION_MODEL
+                        Name of detection model or path to weights (default: v4-fast)
+  --list-mosaic-detection-models
+                        List available detection models
+  --detect-face-mosaics, --no-detect-face-mosaics
+                        Detect and ignore areas of pixelated faces (default: False)
+
+Examples:
+    * Restore video with default settings:
+        lada-cli.exe --input input.mp4
+    * Restore all videos found in the specified directory and save them in a different folder:
+         lada-cli.exe --input path/to/input/dir/ --output /path/to/output/dir/
+    * Use an Nvidia hardware-accelerated encoding preset:
+        lada-cli.exe --input input.mp4 --encoding-preset hevc-nvidia-gpu-hq

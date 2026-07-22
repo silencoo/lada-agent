@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LADA Agent</title>
+    <script src="{{ socketio_client_url }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/remixicon/remixicon.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
+    <style>[hidden] { display: none !important; }</style>
+</head>
+<body>
+<div class="app-shell">
+    <aside class="rail">
+        <a class="brand" href="#overview" aria-label="LADA Agent home">
+            <span class="brand-mark"><i class="ri-movie-2-line"></i></span>
+            <span><strong>LADA</strong><small>Restoration agent</small></span>
+        </a>
+        <nav class="main-nav" aria-label="Main navigation">
+            <button type="button" class="nav-item active" data-page="overview" onclick="switchPage('overview')"><i class="ri-dashboard-line"></i><span>Overview</span></button>
+            <button type="button" class="nav-item" data-page="library" onclick="switchPage('library')"><i class="ri-film-line"></i><span>Video review</span></button>
+            <button type="button" class="nav-item" data-page="logs" onclick="switchPage('logs')"><i class="ri-terminal-box-line"></i><span>Activity</span></button>
+            <button type="button" class="nav-item" data-page="settings" onclick="switchPage('settings')"><i class="ri-settings-3-line"></i><span>Settings</span></button>
+        </nav>
+        <div class="rail-footer">
+            <div id="connectionStatus" class="connection online"><span class="status-dot"></span><span id="connectionText">Connected</span></div>
+            <div id="lastUpdate" class="last-update">Waiting for status</div>
+        </div>
+    </aside>
+
+    <main class="workspace">
+        <section class="page active" id="page-overview" data-page-panel="overview">
+            <header class="page-header">
+                <div><p class="eyebrow">OPERATIONS</p><h1>Restoration overview</h1><p>Monitor throughput, remaining work, and every active restoration.</p></div>
+                <div class="header-actions">
+                    <button type="button" class="btn" onclick="refreshStatus()"><i class="ri-refresh-line"></i>Refresh</button>
+                    <button type="button" class="btn btn-primary" id="startBtn" onclick="startMonitoring()"><i class="ri-play-fill"></i>Start agent</button>
+                    <button type="button" class="btn btn-danger" id="stopBtn" onclick="stopMonitoring()" disabled><i class="ri-stop-fill"></i>Stop</button>
+                    <button type="button" class="btn btn-danger btn-icon-only" id="forceStopBtn" onclick="stopMonitoring(true)" disabled title="Force stop"><i class="ri-close-circle-line"></i></button>
+                </div>
+            </header>
+
+            <div class="health-strip">
+                <div class="agent-state"><span id="statusIndicator" class="stat-indicator stopped-indicator"></span><div><small>AGENT STATUS</small><strong id="statusValue">Stopped</strong></div></div>
+                <div class="metric"><small>IN PROGRESS</small><strong id="processingCount">0</strong><span>videos</span><em class="metric-detail" id="processingSize">0 B active</em></div>
+                <div class="metric"><small>WAITING</small><strong id="queueSize">0</strong><span>videos</span><em class="metric-detail" id="waitingSize">0 B queued</em></div>
+                <div class="metric"><small>HISTORY</small><strong id="processedCount">0</strong><span>videos</span><em class="metric-detail" id="historySize">0 B recorded</em></div>
+            </div>
+
+            <div class="insight-grid">
+                <article class="hero-metric">
+                    <div><p class="eyebrow">PIPELINE REMAINING</p><strong id="totalEta">Calculating…</strong><span id="etaHint">ETA appears after measurable progress</span></div>
+                    <div class="ring" id="overallRing"><span id="overallPercent">0%</span></div>
+                </article>
+                <article class="data-panel"><i class="ri-hard-drive-3-line panel-icon"></i><small>TOTAL VIDEO SIZE</small><strong id="totalVideoSize">0 B</strong><span id="videoLibrarySummary">Across history and pipeline</span></article>
+                <article class="data-panel"><i class="ri-loader-4-line panel-icon"></i><small>PROCESSING LOAD</small><strong id="processingBytes">0 B</strong><span id="queuedBytes">0 B waiting</span></article>
+                <article class="data-panel"><i class="ri-speed-up-line panel-icon"></i><small>LIVE THROUGHPUT</small><strong id="throughput">—</strong><span>Observed processing rate</span></article>
+            </div>
+
+            <div class="overview-grid">
+                <article class="panel active-panel">
+                    <div class="panel-heading"><div><p class="eyebrow">PIPELINE</p><h2>Active tasks</h2></div><button type="button" class="text-btn" onclick="switchPage('library')">Review output <i class="ri-arrow-right-line"></i></button></div>
+                    <div id="activeList" class="task-list"><div class="skeleton-row"></div><div class="skeleton-row"></div></div>
+                </article>
+                <aside class="panel folder-panel">
+                    <div class="panel-heading"><div><p class="eyebrow">INPUTS</p><h2>Watched folders</h2></div><button type="button" class="icon-btn" onclick="addFolder()" title="Add folder"><i class="ri-add-line"></i></button></div>
+                    <div id="monitorDirsList" class="folder-list"><div class="skeleton-row"></div></div>
+                    <button type="button" class="btn btn-block" onclick="openOutput()"><i class="ri-folder-open-line"></i>Open latest Restored</button>
+                    <div class="save-bar"><span class="save-indicator" data-unsaved-indicator style="display:none"><span class="dot"></span>Unsaved folder changes</span><button type="button" class="btn btn-primary js-save" onclick="saveConfig()">Save</button></div>
+                </aside>
+            </div>
+        </section>
+
+        <section class="page" id="page-library" data-page-panel="library">
+            <header class="page-header"><div><p class="eyebrow">QUALITY REVIEW</p><h1>Video comparison</h1><p>Select a completed job and inspect the source beside its restored result.</p></div><button type="button" class="btn" onclick="loadProcessed()"><i class="ri-refresh-line"></i>Refresh library</button></header>
+            <div class="review-layout">
+                <aside class="panel library-panel">
+                    <div class="library-search"><i class="ri-search-line"></i><input id="videoSearch" type="search" placeholder="Search completed videos" oninput="renderProcessedList()"></div>
+                    <div class="library-actions">
+                        <button type="button" class="text-btn" id="selectVisibleBtn" onclick="toggleSelectVisible()">Select all</button>
+                        <span id="historySelectionCount">0 selected</span>
+                        <button type="button" class="icon-btn danger" id="deleteSelectedBtn" onclick="deleteSelectedHistory()" title="Delete selected history records" aria-label="Delete selected history records" disabled><i class="ri-delete-bin-6-line"></i></button>
+                        <button type="button" class="btn btn-compact" id="cleanMissingBtn" onclick="cleanMissingHistory()"><i class="ri-eraser-line"></i>Clean missing</button>
+                    </div>
+                    <div id="processedList" class="processed-list"><div class="skeleton-row"></div></div>
+                </aside>
+                <article class="panel viewer-panel" id="viewerPanel">
+                    <div id="viewerEmpty" class="viewer-empty"><i class="ri-movie-line"></i><h2>Select a completed video</h2><p>The original and restored versions will appear here with synchronized playback controls.</p></div>
+                    <div id="viewerContent" hidden>
+                        <div class="viewer-heading"><div><p class="eyebrow">NOW REVIEWING</p><h2 id="viewerTitle">—</h2></div><div class="viewer-actions"><div class="view-toggle" aria-label="Comparison layout"><button type="button" id="sideBySideBtn" class="active" onclick="setComparisonMode('side')">Side by side</button><button type="button" id="compareModeBtn" onclick="setComparisonMode('compare')">Swipe compare</button></div><button type="button" class="btn" id="syncPlayBtn" onclick="toggleSynchronizedPlayback()"><i class="ri-play-line"></i>Play both</button></div></div>
+                        <div class="video-grid" id="sideBySideView">
+                            <div class="video-column"><div class="video-label">ORIGINAL</div><video id="originalVideo" controls preload="metadata"></video><div id="originalUnavailable" class="media-unavailable" hidden>Original file is unavailable</div></div>
+                            <div class="video-column"><div class="video-label restored">RESTORED</div><video id="restoredVideo" controls preload="metadata" muted></video><div id="restoredUnavailable" class="media-unavailable" hidden>Restored file is unavailable</div></div>
+                        </div>
+                        <div class="compare-stage" id="compareView" hidden style="--comparison: 50%">
+                            <video id="compareOriginalVideo" controls controlslist="nofullscreen" preload="auto" muted aria-label="Original comparison video"></video>
+                            <div class="compare-restored-layer"><video id="compareRestoredVideo" preload="auto" muted aria-label="Restored comparison video"></video></div>
+                            <span class="compare-label compare-label-original">Original</span><span class="compare-label compare-label-restored">Restored</span>
+                            <div class="compare-buffering" id="compareBuffering" role="status" hidden><i class="ri-loader-4-line"></i><span>Buffering both videos…</span></div>
+                            <button type="button" class="compare-fullscreen-btn" id="compareFullscreenBtn" onclick="toggleCompareFullscreen()" title="Enter fullscreen comparison" aria-label="Enter fullscreen comparison"><i class="ri-fullscreen-line"></i><span>Fullscreen compare</span></button>
+                            <div class="compare-divider" aria-hidden="true"><span><i class="ri-arrow-left-right-line"></i></span></div>
+                            <input id="compareSlider" class="compare-slider" type="range" min="0" max="100" value="50" aria-label="Comparison divider position">
+                        </div>
+                        <div class="file-facts"><span id="viewerDate">—</span><span id="viewerSizes">—</span></div>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="page" id="page-logs" data-page-panel="logs">
+            <header class="page-header"><div><p class="eyebrow">DIAGNOSTICS</p><h1>Activity log</h1><p>Follow processor output and web service events in real time.</p></div><button type="button" class="btn active" id="autoRefreshBtn" onclick="toggleAutoRefresh()"><i class="ri-radio-button-line"></i>Live</button></header>
+            <article class="terminal panel"><div class="terminal-header"><div class="terminal-tabs"><button type="button" class="tab-btn active" data-tab="lada" id="logTypeLada" onclick="switchLogType('lada')">Processor</button><button type="button" class="tab-btn" data-tab="web" id="logTypeWeb" onclick="switchLogType('web')">Web service</button></div><button type="button" class="icon-btn" onclick="loadLogs()" title="Refresh logs"><i class="ri-refresh-line"></i></button></div><pre class="log-content" id="logsContent">Loading activity…</pre></article>
+        </section>
+
+        <section class="page" id="page-settings" data-page-panel="settings">
+            <header class="page-header sticky-header"><div><p class="eyebrow">CONFIGURATION</p><h1>Agent settings</h1><p>Changes are validated and applied when you save.</p></div><div class="header-actions"><span class="save-indicator" data-unsaved-indicator style="display:none"><span class="dot"></span>Unsaved changes</span><button type="button" class="btn js-reset" onclick="resetConfig()">Discard</button><button type="button" class="btn btn-primary js-save" onclick="saveConfig()"><i class="ri-save-3-line"></i>Save settings</button></div></header>
+            <div class="settings-layout">
+                <div class="settings-main">
+                    <article class="settings-group"><div class="settings-intro"><i class="ri-sliders-3-line"></i><div><h2>System</h2><p>Scanning and process orchestration.</p></div></div><div class="form-grid"><div class="form-row"><label for="scanInterval">Scan interval <span>seconds</span></label><input class="input" id="scanInterval" type="number" min="1"></div><div class="form-row"><label for="maxConcurrent">Concurrent processes</label><input class="input" id="maxConcurrent" type="number" min="1"></div><div class="form-row form-wide"><label for="ladaCliPath">LADA CLI path</label><input class="input" id="ladaCliPath" type="text" placeholder="lada-cli.exe"></div><label class="switch-row form-wide"><span><strong>Start automatically</strong><small>Launch monitoring when the agent starts</small></span><input type="checkbox" id="autoStart"><span class="switch"></span></label></div></article>
+                    <article class="settings-group"><div class="settings-intro"><i class="ri-cpu-line"></i><div><h2>Restoration</h2><p>Model, device, and inference precision.</p></div></div><div class="form-grid"><div class="form-row"><label for="device">Compute device</label><input class="input" id="device" type="text" placeholder="cuda:0"></div><div class="form-row"><label for="restorationModel">Restoration model</label><input class="input" id="restorationModel" type="text"></div><div class="form-row"><label for="maxClipLength">Maximum clip length <span>frames</span></label><input class="input" id="maxClipLength" type="number" min="1"></div><label class="switch-row"><span><strong>FP16 inference</strong><small>Reduce VRAM usage</small></span><input type="checkbox" id="fp16"><span class="switch"></span></label></div></article>
+                    <article class="settings-group"><div class="settings-intro"><i class="ri-focus-2-line"></i><div><h2>Detection</h2><p>Control mosaic discovery.</p></div></div><div class="form-grid"><div class="form-row"><label for="detectionModel">Detection model</label><input class="input" id="detectionModel" type="text"></div><label class="switch-row"><span><strong>Detect face mosaics</strong><small>Include facial regions in detection</small></span><input type="checkbox" id="detectFaceMosaics"><span class="switch"></span></label></div></article>
+                    <article class="settings-group"><div class="settings-intro"><i class="ri-movie-line"></i><div><h2>Encoding</h2><p>Output format and playback compatibility.</p></div></div><div class="form-grid"><div class="form-row"><label for="encodingPreset">Encoding preset</label><input class="input" id="encodingPreset" type="text"></div><div class="form-row"><label for="encoder">Encoder</label><input class="input" id="encoder" type="text"></div><div class="form-row form-wide"><label for="encoderOptions">Encoder options</label><input class="input" id="encoderOptions" type="text" placeholder="-crf 20"></div><label class="switch-row form-wide"><span><strong>MP4 fast start</strong><small>Optimize output for web playback</small></span><input type="checkbox" id="mp4FastStart"><span class="switch"></span></label></div></article>
+                    <article class="settings-group"><div class="settings-intro"><i class="ri-folder-settings-line"></i><div><h2>Paths</h2><p>Temporary and restored file destinations.</p></div></div><div class="form-grid"><div class="form-row form-wide"><label for="temporaryDirectory">Temporary directory</label><input class="input" id="temporaryDirectory" type="text"></div><div class="form-row"><label for="outputPattern">Output pattern</label><input class="input" id="outputPattern" type="text"></div><div class="form-row"><label for="restorationConfigPath">Restoration config</label><input class="input" id="restorationConfigPath" type="text"></div></div></article>
+                    <article class="settings-group"><div class="settings-intro"><i class="ri-heart-pulse-line"></i><div><h2>Uptime Kuma</h2><p>Push agent health to your monitor.</p></div></div><div class="form-grid"><label class="switch-row form-wide"><span><strong>Enable push monitoring</strong><small>Send periodic status updates</small></span><input type="checkbox" id="uptimeEnabled"><span class="switch"></span></label><div class="form-row form-wide"><label for="uptimePushUrl">Push URL</label><input class="input" id="uptimePushUrl" type="url"></div><div class="form-row"><label for="uptimeInterval">Interval <span>seconds</span></label><input class="input" id="uptimeInterval" type="number" min="1"></div><div class="form-row"><label for="uptimeStatus">Status</label><input class="input" id="uptimeStatus" type="text"></div><div class="form-row form-wide"><label for="uptimeMessage">Message</label><input class="input" id="uptimeMessage" type="text"></div></div></article>
+                </div>
+            </div>
+        </section>
+    </main>
+</div>
+<div id="notification" class="notification" role="status" aria-live="polite"><i class="ri-information-fill" id="notifIcon"></i><span id="notifMessage">Message</span></div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

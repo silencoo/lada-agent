@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lada-agent"
+version = "0.2.0"
+description = "Automatically monitor a directory for new video files and run LADA demosaic restoration"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "src/lada_agent/static/vendor/*/LICENSE",
+]
+authors = [
+    { name = "RS" },
+]
+keywords = ["lada", "video", "restoration", "watchdog", "demosaic"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    "flask>=2.3.0",
+    "flask-socketio>=5.3.0",
+    "watchdog>=3.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[tool.uv]
+default-groups = []
+
+[project.scripts]
+lada-monitor = "lada_agent.cli:main"
+lada-web = "lada_agent.web:main"
+lada-gui = "lada_agent.gui:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lada_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

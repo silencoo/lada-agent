@@ -1,0 +1,55 @@
+{
+  "monitor_directories": [
+    "C:\\Downloads\\Videos",
+    "D:\\Torrents"
+  ],
+  "output_directory": "C:\\Downloads\\Restored",
+  "lada_cli_path": "C:\\Tools\\lada-cli.exe",
+  "supported_extensions": [
+    ".mp4",
+    ".avi",
+    ".mkv",
+    ".mov",
+    ".wmv",
+    ".flv",
+    ".webm"
+  ],
+  "lada_options": {
+    "device": "cuda:0",
+    "fp16": true,
+    "mosaic_restoration_model": "basicvsrpp-v1.2",
+    "max_clip_length": 180,
+    "mosaic_detection_model": "v4-fast",
+    "detect_face_mosaics": false,
+    "encoding_preset": "hevc-nvidia-gpu-hq",
+    "encoder": "",
+    "encoder_options": "",
+    "mp4_fast_start": false,
+    "temporary_directory": "",
+    "output_file_pattern": "{orig_file_name}.restored.mp4",
+    "mosaic_restoration_config_path": ""
+  },
+  "scan_interval": 10,
+  "processed_files_log": "../data/processed_files.json",
+  "log_level": "INFO",
+  "log_file": "../logs/lada_monitor.log",
+  "max_concurrent_processes": 2,
+  "auto_start": true,
+  "move_processed_files": false,
+  "processed_files_destination": "",
+  "output_directory_name": "Restored",
+  "output_file_keywords": ["_demosaic", ".restored"],
+  "temporary_file_extensions": [".part", ".crdownload", ".tmp", ".aria2", ".!qb"],
+  "file_ready_check_interval": 2,
+  "file_ready_retry_delay": 10,
+  "file_ready_max_retries": 30,
+  "web_access_token": "",
+  "web_socketio_client_url": "",
+  "uptime_kuma": {
+    "enabled": false,
+    "push_url": "https://uptime.example.com/api/push/your-key",
+    "interval_seconds": 60,
+    "status": "up",
+    "message": "LADA Agent online"
+  }
+}
