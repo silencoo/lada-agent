@@ -20,3 +20,7 @@ Web UI 的 Socket.IO client、Remix Icon 字体和对应许可证属于可复现
 发布包建议通过 CI 或本机构建脚本生成，并上传到 release artifact。源码仓库不直接存放打包后的 `exe`、运行日志、处理记录或模型依赖目录。
 
 发布前在 Windows 执行 `scripts/check.ps1`，在 Linux/macOS 执行 `scripts/check.sh`。两者会校验 lock、运行测试和 Ruff、检查 JavaScript 语法并构建 wheel/sdist。
+
+0.3.0 的 Python 发布产物应为 `lada_agent-0.3.0-py3-none-any.whl` 和
+`lada_agent-0.3.0.tar.gz`。CI 还会在无 `DISPLAY` 的 Ubuntu runner 上运行诊断/版本/命令
+预览相关合同测试，并对全部 Unix 启动脚本执行 `sh -n`。

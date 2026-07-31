@@ -1,0 +1,15 @@
+[Unit]
+Description=LADA Agent headless directory monitor
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/lada_agent
+Environment=LADA_AGENT_CONFIG=%h/lada_agent/config/config.json
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env sh %h/lada_agent/scripts/start_unix.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -12,6 +12,8 @@ let socket = null;
         let selectedHistoryHashes = new Set();
         let comparisonMode = 'side';
         let resetComparisonPlayback = () => {};
+        let commandPreviewText = '';
+        let smokePollTimer = null;
 
         function switchPage(page) {
             const target = document.querySelector(`[data-page-panel="${page}"]`);
@@ -236,7 +238,7 @@ let socket = null;
         }
 
         function bindInputHandlers() {
-            document.querySelectorAll('.input').forEach(el => {
+            document.querySelectorAll('.input:not([data-runtime-input]), #extraCliArgs').forEach(el => {
                 el.addEventListener('input', markDirty);
             });
             document.querySelectorAll('input[type="checkbox"]').forEach(el => {
@@ -451,25 +453,31 @@ let socket = null;
 
             document.getElementById('scanInterval').value = currentConfig.scan_interval ?? 10;
             document.getElementById('maxConcurrent').value = currentConfig.max_concurrent_processes ?? 1;
-            document.getElementById('ladaCliPath').value = currentConfig.lada_cli_path ?? 'lada-cli.exe';
+            document.getElementById('ladaCliPath').value = currentConfig.lada_cli_path ?? 'lada-cli';
+            document.getElementById('preflightOnStart').checked = currentConfig.preflight_on_start !== false;
             document.getElementById('autoStart').checked = Boolean(currentConfig.auto_start);
 
-            document.getElementById('device').value = opts.device ?? 'cuda:0';
+            document.getElementById('device').value = opts.device || 'auto';
             document.getElementById('restorationModel').value = opts.mosaic_restoration_model ?? 'basicvsrpp-v1.2';
             document.getElementById('maxClipLength').value = opts.max_clip_length ?? 180;
-            document.getElementById('fp16').checked = opts.fp16 !== false;
+            document.getElementById('fp16').value = opts.fp16 == null ? 'auto' : (opts.fp16 ? 'on' : 'off');
 
             document.getElementById('detectionModel').value = opts.mosaic_detection_model ?? 'v4-fast';
             document.getElementById('detectFaceMosaics').checked = Boolean(opts.detect_face_mosaics);
 
-            document.getElementById('encodingPreset').value = opts.encoding_preset ?? 'hevc-nvidia-gpu-hq';
+            document.getElementById('encodingPreset').value = opts.encoding_preset || 'auto';
             document.getElementById('encoder').value = opts.encoder ?? '';
             document.getElementById('encoderOptions').value = opts.encoder_options ?? '';
+            document.getElementById('encoderOptionsHelp').hidden = true;
             document.getElementById('mp4FastStart').checked = Boolean(opts.mp4_fast_start);
 
             document.getElementById('temporaryDirectory').value = opts.temporary_directory ?? '';
             document.getElementById('outputPattern').value = opts.output_file_pattern ?? '{orig_file_name}.restored.mp4';
             document.getElementById('restorationConfigPath').value = opts.mosaic_restoration_config_path ?? '';
+            document.getElementById('extraCliArgs').value = opts.extra_cli_args ?? '';
+            document.getElementById('ladaProfiles').value = JSON.stringify(currentConfig.lada_profiles || {}, null, 2);
+            document.getElementById('directoryProfiles').value = JSON.stringify(currentConfig.directory_profiles || {}, null, 2);
+            refreshProfileSelects();
 
             const uptime = currentConfig.uptime_kuma || {};
             document.getElementById('uptimeEnabled').checked = Boolean(uptime.enabled);
@@ -482,19 +490,21 @@ let socket = null;
         function collectSettings() {
             currentConfig.scan_interval = Math.max(1, parseInt(document.getElementById('scanInterval').value, 10) || 10);
             currentConfig.max_concurrent_processes = Math.max(1, parseInt(document.getElementById('maxConcurrent').value, 10) || 1);
-            currentConfig.lada_cli_path = document.getElementById('ladaCliPath').value.trim() || 'lada-cli.exe';
+            currentConfig.lada_cli_path = document.getElementById('ladaCliPath').value.trim() || 'lada-cli';
+            currentConfig.preflight_on_start = document.getElementById('preflightOnStart').checked;
             currentConfig.auto_start = document.getElementById('autoStart').checked;
 
             if (!currentConfig.lada_options) currentConfig.lada_options = {};
-            currentConfig.lada_options.device = document.getElementById('device').value.trim() || 'cuda:0';
+            currentConfig.lada_options.device = document.getElementById('device').value.trim() || 'auto';
             currentConfig.lada_options.mosaic_restoration_model = document.getElementById('restorationModel').value.trim();
             currentConfig.lada_options.max_clip_length = Math.max(1, parseInt(document.getElementById('maxClipLength').value, 10) || 180);
-            currentConfig.lada_options.fp16 = document.getElementById('fp16').checked;
+            const fp16Mode = document.getElementById('fp16').value;
+            currentConfig.lada_options.fp16 = fp16Mode === 'auto' ? null : fp16Mode === 'on';
 
             currentConfig.lada_options.mosaic_detection_model = document.getElementById('detectionModel').value.trim();
             currentConfig.lada_options.detect_face_mosaics = document.getElementById('detectFaceMosaics').checked;
 
-            currentConfig.lada_options.encoding_preset = document.getElementById('encodingPreset').value.trim();
+            currentConfig.lada_options.encoding_preset = document.getElementById('encodingPreset').value.trim() || 'auto';
             currentConfig.lada_options.encoder = document.getElementById('encoder').value.trim();
             currentConfig.lada_options.encoder_options = document.getElementById('encoderOptions').value.trim();
             currentConfig.lada_options.mp4_fast_start = document.getElementById('mp4FastStart').checked;
@@ -502,6 +512,9 @@ let socket = null;
             currentConfig.lada_options.temporary_directory = document.getElementById('temporaryDirectory').value.trim();
             currentConfig.lada_options.output_file_pattern = document.getElementById('outputPattern').value.trim() || '{orig_file_name}.restored.mp4';
             currentConfig.lada_options.mosaic_restoration_config_path = document.getElementById('restorationConfigPath').value.trim();
+            currentConfig.lada_options.extra_cli_args = document.getElementById('extraCliArgs').value.trim();
+            currentConfig.lada_profiles = parseJsonEditor('ladaProfiles', 'Named templates');
+            currentConfig.directory_profiles = parseJsonEditor('directoryProfiles', 'Directory assignments');
 
             if (!currentConfig.uptime_kuma) currentConfig.uptime_kuma = {};
             currentConfig.uptime_kuma.enabled = document.getElementById('uptimeEnabled').checked;
@@ -509,6 +522,339 @@ let socket = null;
             currentConfig.uptime_kuma.interval_seconds = Math.max(1, parseInt(document.getElementById('uptimeInterval').value, 10) || 60);
             currentConfig.uptime_kuma.status = document.getElementById('uptimeStatus').value.trim() || 'up';
             currentConfig.uptime_kuma.message = document.getElementById('uptimeMessage').value.trim() || 'LADA Agent online';
+        }
+
+        function parseJsonEditor(id, label) {
+            const input = document.getElementById(id);
+            try {
+                const parsed = JSON.parse(input.value.trim() || '{}');
+                if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+                    throw new Error('must be a JSON object');
+                }
+                input.removeAttribute('aria-invalid');
+                return parsed;
+            } catch (error) {
+                input.setAttribute('aria-invalid', 'true');
+                input.focus();
+                throw new Error(`${label}: ${error.message}`);
+            }
+        }
+
+        function refreshProfileSelects() {
+            const names = Object.keys(currentConfig.lada_profiles || {}).sort();
+            ['smokeProfile', 'manualTaskProfile'].forEach(id => {
+                const select = document.getElementById(id);
+                const selected = select.value;
+                select.replaceChildren();
+                const globalOption = document.createElement('option');
+                globalOption.value = '';
+                globalOption.textContent = 'Global settings';
+                select.appendChild(globalOption);
+                names.forEach(name => {
+                    const option = document.createElement('option');
+                    option.value = name;
+                    option.textContent = name;
+                    select.appendChild(option);
+                });
+                if (names.includes(selected)) select.value = selected;
+            });
+        }
+
+        function replaceDatalist(id, values, includeAuto = false) {
+            const list = document.getElementById(id);
+            list.replaceChildren();
+            const normalized = includeAuto ? ['auto', ...(values || [])] : (values || []);
+            [...new Set(normalized)].forEach(value => {
+                const option = document.createElement('option');
+                option.value = value;
+                list.appendChild(option);
+            });
+        }
+
+        function capabilityValues(data, key) {
+            return data?.capabilities?.[key]?.values || [];
+        }
+
+        function probeLadaCapabilities() {
+            const button = document.getElementById('probeLadaBtn');
+            const status = document.getElementById('ladaCapabilityStatus');
+            const original = button.innerHTML;
+            button.disabled = true;
+            button.innerHTML = '<span class="spinner" style="width:14px;height:14px;"></span> Detecting';
+            status.textContent = 'Starting Lada list commands. Packaged builds may take a moment…';
+
+            fetch('/api/lada/capabilities', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lada_cli_path: document.getElementById('ladaCliPath').value.trim() })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    replaceDatalist('ladaDeviceOptions', capabilityValues(data, 'devices'), true);
+                    replaceDatalist('ladaRestorationModelOptions', capabilityValues(data, 'restoration_models'));
+                    replaceDatalist('ladaDetectionModelOptions', capabilityValues(data, 'detection_models'));
+                    replaceDatalist('ladaEncodingPresetOptions', capabilityValues(data, 'encoding_presets'), true);
+                    replaceDatalist('ladaEncoderOptions', capabilityValues(data, 'encoders'));
+
+                    const discovered = Object.values(data.capabilities || {})
+                        .filter(result => result.ok)
+                        .reduce((total, result) => total + (result.values?.length || 0), 0);
+                    const compatibility = data.compatibility || {};
+                    status.textContent = data.success
+                        ? `Lada ${compatibility.version || 'detected'} · ${compatibility.label || 'compatibility unknown'} · ${discovered} selectable values loaded.`
+                        : (data.version_error || data.message || 'Could not detect this Lada CLI.');
+                    showNotification(data.success ? 'Lada options detected' : status.textContent, data.success ? 'success' : 'error');
+                })
+                .catch(() => {
+                    status.textContent = 'Capability request failed. Check the CLI path and web log.';
+                    showNotification(status.textContent, 'error');
+                })
+                .finally(() => {
+                    button.disabled = false;
+                    button.innerHTML = original;
+                });
+        }
+
+        function inspectEncoderOptions() {
+            const encoder = document.getElementById('encoder').value.trim();
+            const output = document.getElementById('encoderOptionsHelp');
+            if (!encoder) {
+                document.getElementById('encoder').focus();
+                showNotification('Choose an encoder first', 'error');
+                return;
+            }
+            output.hidden = false;
+            output.textContent = 'Loading encoder options…';
+            fetch('/api/lada/encoder-options', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    lada_cli_path: document.getElementById('ladaCliPath').value.trim(),
+                    encoder
+                })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    output.textContent = data.output || data.error || 'No options reported by Lada.';
+                    if (!data.success) showNotification(data.error || 'Unable to inspect encoder options', 'error');
+                })
+                .catch(() => {
+                    output.textContent = 'Encoder option request failed.';
+                    showNotification(output.textContent, 'error');
+                });
+        }
+
+        function collectForRuntimeAction() {
+            try {
+                collectSettings();
+                refreshProfileSelects();
+                return true;
+            } catch (error) {
+                showNotification(error.message || 'Invalid settings JSON', 'error');
+                return false;
+            }
+        }
+
+        function setRuntimeButtonLoading(id, loading, label) {
+            const button = document.getElementById(id);
+            if (!button.dataset.label) button.dataset.label = button.innerHTML;
+            button.disabled = loading;
+            button.innerHTML = loading
+                ? `<span class="spinner" style="width:14px;height:14px;"></span> ${label}`
+                : button.dataset.label;
+        }
+
+        function renderDiagnosticReport(report) {
+            const container = document.getElementById('runtimeReport');
+            container.replaceChildren();
+            (report.checks || []).forEach(check => {
+                const row = document.createElement('div');
+                row.className = `diagnostic-row status-${check.status || 'info'}`;
+                const status = document.createElement('span');
+                status.className = 'diagnostic-status';
+                status.textContent = (check.status || 'info').toUpperCase();
+                const copy = document.createElement('div');
+                copy.className = 'diagnostic-copy';
+                const title = document.createElement('strong');
+                title.textContent = check.label || check.id;
+                const message = document.createElement('span');
+                message.textContent = check.message || '';
+                copy.append(title, message);
+                row.append(status, copy);
+                container.appendChild(row);
+            });
+            if (!container.childElementCount) {
+                const empty = document.createElement('p');
+                empty.textContent = 'The server returned no diagnostic checks.';
+                container.appendChild(empty);
+            }
+        }
+
+        function runDiagnostics() {
+            if (!collectForRuntimeAction()) return;
+            setRuntimeButtonLoading('diagnosticsBtn', true, 'Checking');
+            const container = document.getElementById('runtimeReport');
+            container.replaceChildren();
+            const pending = document.createElement('p');
+            pending.textContent = 'Running Lada list commands and checking paths. This can take a minute…';
+            container.appendChild(pending);
+            fetch('/api/lada/diagnostics', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ config: currentConfig })
+            })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.message || 'Diagnostics failed');
+                    renderDiagnosticReport(data);
+                    showNotification(`Diagnostics completed: ${data.status}`, data.status === 'fail' ? 'error' : 'success');
+                })
+                .catch(error => {
+                    container.replaceChildren();
+                    const message = document.createElement('p');
+                    message.textContent = error.message || 'Diagnostics failed';
+                    container.appendChild(message);
+                    showNotification(message.textContent, 'error');
+                })
+                .finally(() => setRuntimeButtonLoading('diagnosticsBtn', false, 'Checking'));
+        }
+
+        function previewCommand() {
+            if (!collectForRuntimeAction()) return;
+            setRuntimeButtonLoading('commandPreviewBtn', true, 'Building');
+            const source = document.getElementById('smokeInput').value.trim() || '/data/input/sample.mp4';
+            const output = source.replace(/\.[^./\\]+$/, '') + '.restored.mp4';
+            fetch('/api/lada/command-preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    config: currentConfig,
+                    input: source,
+                    output,
+                    profile: document.getElementById('smokeProfile').value
+                })
+            })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to build command');
+                    commandPreviewText = data.command || '';
+                    document.getElementById('commandPreview').textContent = commandPreviewText;
+                    document.getElementById('copyCommandBtn').disabled = !commandPreviewText;
+                    const layers = data.profiles?.length
+                        ? `Profiles: ${data.profiles.join(' → ')}. `
+                        : 'Profiles: global only. ';
+                    document.getElementById('commandOverrideStatus').textContent = layers + (data.overrides?.length
+                        ? `Advanced override wins for: ${data.overrides.join(', ')}`
+                        : 'No standard form flags are overridden by the advanced argument layer.');
+                    showNotification('Final argv preview updated', 'success');
+                })
+                .catch(error => showNotification(error.message || 'Command preview failed', 'error'))
+                .finally(() => setRuntimeButtonLoading('commandPreviewBtn', false, 'Building'));
+        }
+
+        function copyCommandPreview() {
+            if (!commandPreviewText) return;
+            navigator.clipboard.writeText(commandPreviewText)
+                .then(() => showNotification('Command copied', 'success'))
+                .catch(() => showNotification('Clipboard access failed', 'error'));
+        }
+
+        function renderSmokeStatus(data) {
+            const output = document.getElementById('smokeTestStatus');
+            const lines = [`Status: ${data.status || 'unknown'}`];
+            if (data.profile) lines.push(`Profile: ${data.profile}`);
+            if (data.duration_seconds != null) lines.push(`Duration: ${data.duration_seconds}s`);
+            if (data.output_size != null) lines.push(`Validated output: ${formatBytes(data.output_size)}`);
+            if (data.message) lines.push(data.message);
+            if (data.command) lines.push(`Command: ${data.command}`);
+            if (data.probe?.error) lines.push(`Probe: ${data.probe.error}`);
+            if (data.log_tail) lines.push('', data.log_tail);
+            output.textContent = lines.join('\n');
+        }
+
+        function pollSmokeTest() {
+            fetch('/api/lada/smoke-test')
+                .then(response => response.json())
+                .then(data => {
+                    renderSmokeStatus(data);
+                    const running = data.status === 'running';
+                    document.getElementById('smokeTestBtn').disabled = running;
+                    if (!running && smokePollTimer) {
+                        clearInterval(smokePollTimer);
+                        smokePollTimer = null;
+                        showNotification(data.status === 'passed' ? 'Real smoke test passed' : 'Smoke test finished with errors', data.status === 'passed' ? 'success' : 'error');
+                    }
+                })
+                .catch(() => {
+                    if (smokePollTimer) clearInterval(smokePollTimer);
+                    smokePollTimer = null;
+                    document.getElementById('smokeTestBtn').disabled = false;
+                });
+        }
+
+        function startSmokeTest() {
+            if (isDirty) {
+                showNotification('Save settings and templates before running a real smoke test', 'error');
+                return;
+            }
+            const inputPath = document.getElementById('smokeInput').value.trim();
+            if (!inputPath) {
+                document.getElementById('smokeInput').focus();
+                showNotification('Choose a sample video inside a monitored directory', 'error');
+                return;
+            }
+            document.getElementById('smokeTestBtn').disabled = true;
+            document.getElementById('smokeTestStatus').textContent = 'Starting real Lada smoke test…';
+            fetch('/api/lada/smoke-test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    input_path: inputPath,
+                    profile: document.getElementById('smokeProfile').value,
+                    seconds: Number(document.getElementById('smokeSeconds').value) || 3,
+                    max_width: Math.max(0, Number(document.getElementById('smokeMaxWidth').value) || 0),
+                    max_fps: Math.max(0, Number(document.getElementById('smokeMaxFps').value) || 0)
+                })
+            })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || !data.accepted) throw new Error(data.message || 'Smoke test could not start');
+                    renderSmokeStatus(data);
+                    if (smokePollTimer) clearInterval(smokePollTimer);
+                    smokePollTimer = setInterval(pollSmokeTest, 3000);
+                    pollSmokeTest();
+                })
+                .catch(error => {
+                    document.getElementById('smokeTestBtn').disabled = false;
+                    showNotification(error.message || 'Smoke test could not start', 'error');
+                });
+        }
+
+        function enqueueManualTask() {
+            if (isDirty) {
+                showNotification('Save templates before queueing a task', 'error');
+                return;
+            }
+            const path = document.getElementById('manualTaskPath').value.trim();
+            if (!path) {
+                document.getElementById('manualTaskPath').focus();
+                showNotification('Enter a task file path', 'error');
+                return;
+            }
+            setRuntimeButtonLoading('enqueueTaskBtn', true, 'Queueing');
+            fetch('/api/tasks/enqueue', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path, profile: document.getElementById('manualTaskProfile').value })
+            })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to queue task');
+                    showNotification(`${data.message} · ${data.profile}`, 'success');
+                    loadQueue();
+                })
+                .catch(error => showNotification(error.message || 'Unable to queue task', 'error'))
+                .finally(() => setRuntimeButtonLoading('enqueueTaskBtn', false, 'Queueing'));
         }
 
         function renderDirs() {
@@ -573,7 +919,25 @@ let socket = null;
 
         function saveConfig() {
             if (isSaving) return;
-            collectSettings();
+            try {
+                collectSettings();
+            } catch (error) {
+                showNotification(error.message || 'Settings JSON is invalid', 'error');
+                return;
+            }
+
+            const patternInput = document.getElementById('outputPattern');
+            const pattern = patternInput.value.trim();
+            if (!pattern.includes('{orig_file_name}') || !/\.[^./\\]+$/.test(pattern)) {
+                patternInput.focus();
+                showNotification('Output pattern must include {orig_file_name} and a file extension', 'error');
+                return;
+            }
+            if (currentConfig.lada_options.encoder_options && !currentConfig.lada_options.encoder) {
+                document.getElementById('encoder').focus();
+                showNotification('Choose a custom encoder before adding encoder options', 'error');
+                return;
+            }
 
             setSaveButtonsLoading(true);
             fetch('/api/config/update', {
@@ -585,6 +949,7 @@ let socket = null;
                 .then(data => {
                     if (data.success) {
                         setDirty(false);
+                        refreshProfileSelects();
                         showNotification(data.message || 'Configuration saved successfully', 'success');
                     } else {
                         showNotification(data.message || 'Save failed', 'error');

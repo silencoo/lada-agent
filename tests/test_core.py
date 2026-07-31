@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -11,8 +12,24 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from lada_agent import web_app
-from lada_agent.config_manager import atomic_write_json, load_config, resolve_runtime_paths
+from lada_agent import diagnostics, web_app
+from lada_agent.config_manager import (
+    atomic_write_json,
+    load_config,
+    resolve_runtime_paths,
+    sanitize_config_update,
+    save_config,
+)
+from lada_agent.lada_client import (
+    build_lada_command,
+    build_lada_command_preview,
+    discover_lada_capabilities,
+    discover_lada_encoder_options,
+    evaluate_lada_version,
+    parse_extra_cli_args,
+    validate_extra_cli_args,
+    validate_output_file_pattern,
+)
 from lada_agent.lada_monitor import LadaMonitor
 
 
@@ -59,6 +76,364 @@ def test_web_config_update_uses_whitelist_and_bounds(web_config):
     assert saved["lada_options"]["max_clip_length"] == 1
     assert "unexpected_top_level" not in saved
     assert "unexpected_option" not in saved["lada_options"]
+
+
+def test_lada_auto_defaults_preserve_upstream_hardware_detection():
+    command = build_lada_command(
+        "lada-cli.exe",
+        "input.mp4",
+        "output.mp4",
+        {
+            "device": "auto",
+            "fp16": None,
+            "encoding_preset": "auto",
+            "output_file_pattern": "{orig_file_name}.restored.mp4",
+        },
+    )
+
+    assert "--device" not in command
+    assert "--fp16" not in command
+    assert "--no-fp16" not in command
+    assert "--encoding-preset" not in command
+    assert "--no-mp4-fast-start" in command
+    assert "--no-detect-face-mosaics" in command
+    assert command[1:5] == ["--input", "input.mp4", "--output", "output.mp4"]
+
+
+def test_lada_version_compatibility_is_explicit_about_validation_level():
+    stable = evaluate_lada_version("Lada: 0.11.0")
+    development = evaluate_lada_version("Lada: 0.11.1-dev+abc123")
+    future = evaluate_lada_version("Lada: 0.12.0")
+
+    assert stable["status"] == "source-verified"
+    assert development["status"] == "compatible-unverified"
+    assert future["status"] == "future-unverified"
+    assert stable["latest_stable"] == "0.11.0"
+
+
+def test_command_preview_reports_advanced_flags_that_override_form_values():
+    preview = build_lada_command_preview(
+        "lada-cli",
+        "/input/movie.mp4",
+        "/output/movie.restored.mp4",
+        {
+            "device": "cuda:0",
+            "fp16": True,
+            "encoding_preset": "auto",
+            "output_file_pattern": "{orig_file_name}.restored.mp4",
+            "extra_cli_args": "--device cpu --no-fp16",
+        },
+        platform="posix",
+    )
+
+    assert preview["shell"] is False
+    assert preview["argv"][-3:] == ["--device", "cpu", "--no-fp16"]
+    assert preview["overrides"] == ["--device", "--no-fp16"]
+    assert "--device cpu" in preview["command"]
+
+
+def test_named_profiles_are_sanitized_and_directory_assignments_are_validated(tmp_path):
+    config = sanitize_config_update(
+        {
+            "lada_profiles": {"cpu-safe": {"device": "cpu", "fp16": False, "unknown": "ignored"}},
+            "directory_profiles": {str(tmp_path / "input"): "cpu-safe"},
+        }
+    )
+    config_path = tmp_path / "config.json"
+    save_config(str(config_path), config)
+
+    assert config["lada_profiles"]["cpu-safe"] == {"device": "cpu", "fp16": False}
+    assert config["directory_profiles"] == {str(tmp_path / "input"): "cpu-safe"}
+
+
+def test_environment_diagnostics_pass_in_headless_linux_shape(tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr(diagnostics, "resolve_lada_executable", lambda _value: "/bin/lada-cli")
+    monkeypatch.setattr(
+        diagnostics,
+        "discover_lada_capabilities",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "compatibility": {
+                "status": "source-verified",
+                "version": "0.11.0",
+                "message": "verified",
+            },
+            "capabilities": {
+                "devices": {"ok": True, "values": ["cpu"]},
+                "encoders": {"ok": True, "values": ["libx264"]},
+            },
+        },
+    )
+    monkeypatch.setattr(diagnostics.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    report = diagnostics.diagnose_environment(
+        {
+            "monitor_directories": [str(input_dir)],
+            "output_directory": str(tmp_path / "output"),
+            "lada_cli_path": "lada-cli",
+            "lada_options": {"temporary_directory": str(tmp_path)},
+        }
+    )
+
+    assert report["headless"] is True
+    assert report["status"] == "pass"
+    assert {check["id"] for check in report["checks"]} >= {
+        "headless",
+        "lada-cli",
+        "compute-device",
+        "encoders",
+        "ffmpeg",
+    }
+
+
+def test_smoke_test_uses_short_sample_and_validates_output(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    monkeypatch.setattr(diagnostics, "resolve_lada_executable", lambda _value: "lada-cli")
+    monkeypatch.setattr(diagnostics.shutil, "which", lambda name: name)
+
+    def make_sample(_ffmpeg, _source, sample_path, seconds, max_width, max_fps):
+        assert seconds == 2
+        assert max_width == 320
+        assert max_fps == 2
+        Path(sample_path).write_bytes(b"sample")
+
+    def run_command(command, **_kwargs):
+        output = command[command.index("--output") + 1]
+        Path(output).write_bytes(b"restored-video")
+        return mock.Mock(returncode=0, stdout="Processing audio\n")
+
+    monkeypatch.setattr(diagnostics, "_make_short_sample", make_sample)
+    monkeypatch.setattr(diagnostics, "_probe_video", lambda *_args: {"ok": True})
+    monkeypatch.setattr(diagnostics.subprocess, "run", run_command)
+
+    result = diagnostics.run_lada_smoke_test(
+        {
+            "lada_cli_path": "lada-cli",
+            "lada_options": {"output_file_pattern": "{orig_file_name}.restored.mp4"},
+        },
+        str(source),
+        seconds=2,
+        max_width=320,
+        max_fps=2,
+    )
+
+    assert result["success"] is True
+    assert result["output_size"] == len(b"restored-video")
+    assert result["output_path"] == ""
+    assert result["sample_max_width"] == 320
+    assert result["sample_max_fps"] == 2
+
+
+def test_lada_explicit_options_and_advanced_overrides_are_ordered_last():
+    command = build_lada_command(
+        "lada-cli.exe",
+        "input.mp4",
+        "output.mp4",
+        {
+            "device": "cuda:0",
+            "fp16": True,
+            "mosaic_restoration_model": "basicvsrpp-v1.2",
+            "max_clip_length": 240,
+            "mosaic_detection_model": "v4-accurate",
+            "detect_face_mosaics": True,
+            "encoding_preset": "hevc-nvidia-gpu-hq",
+            "mp4_fast_start": True,
+            "temporary_directory": "work dir",
+            "mosaic_restoration_config_path": "model.py",
+            "output_file_pattern": "{orig_file_name}.restored.mp4",
+            "extra_cli_args": '--device cpu --no-fp16 --encoder-options "-crf 20"',
+            "encoder": "libx264",
+            "encoder_options": "-crf 18",
+        },
+    )
+
+    assert "--encoding-preset" not in command
+    assert command[-5:] == ["--device", "cpu", "--no-fp16", "--encoder-options", "-crf 20"]
+    assert command.index("--fp16") < command.index("--no-fp16")
+    assert [command[command.index("--max-clip-length") + 1]] == ["240"]
+
+
+def test_advanced_cli_parser_preserves_quoted_values_and_protects_task_boundaries():
+    assert parse_extra_cli_args('--encoder-options "-crf 20 -preset slow" --device cpu') == [
+        "--encoder-options",
+        "-crf 20 -preset slow",
+        "--device",
+        "cpu",
+    ]
+    assert validate_extra_cli_args("--output elsewhere.mp4")
+    assert validate_extra_cli_args("--list-devices")
+    assert validate_extra_cli_args("--device cpu") == []
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    ["fixed.mp4", "{orig_file_name}", "folder/{orig_file_name}.mp4", "{unknown}.mp4"],
+)
+def test_output_pattern_rejects_collisions_and_unsupported_templates(pattern):
+    assert validate_output_file_pattern(pattern)
+
+
+def test_output_pattern_accepts_safe_per_input_name():
+    assert validate_output_file_pattern("{orig_file_name}.clean.mp4") == []
+
+
+def test_web_rejects_protected_advanced_arguments(web_config):
+    config_path = web_config()
+    response = web_app.app.test_client().post(
+        "/api/config/update",
+        json={"lada_options": {"extra_cli_args": "--input other.mp4"}},
+    )
+
+    assert response.status_code == 400
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "extra_cli_args" not in saved.get("lada_options", {})
+
+
+def test_web_keeps_long_custom_model_paths(web_config):
+    config_path = web_config()
+    model_path = "C:/models/" + ("nested/" * 30) + "custom-model.pth"
+    response = web_app.app.test_client().post(
+        "/api/config/update",
+        json={"lada_options": {"mosaic_restoration_model": model_path}},
+    )
+
+    assert response.status_code == 200
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["lada_options"]["mosaic_restoration_model"] == model_path
+
+
+def test_lada_capability_discovery_parses_cli_tables(monkeypatch):
+    outputs = {
+        "--version": "Lada: 0.11.0",
+        "--list-devices": (
+            "Available devices:\n  Device  Description\n  ------  -----------\n"
+            "  cpu     CPU\n  xpu:0   Intel Arc"
+        ),
+        "--list-encoding-presets": "Presets:\n  Name          Description\n  h264-cpu-fast Fast",
+        "--list-encoders": "Encoders:\n  Name     Description\n  libx264  H.264",
+        "--list-mosaic-restoration-models": (
+            "Models:\n  Name              Path\n  basicvsrpp-v1.2   model.pth"
+        ),
+        "--list-mosaic-detection-models": "Models:\n  Name     Path\n  v4-fast  model.pt",
+    }
+
+    def fake_run(command, **_kwargs):
+        return mock.Mock(returncode=0, stdout=outputs[command[-1]])
+
+    monkeypatch.setattr("lada_agent.lada_client.subprocess.run", fake_run)
+    result = discover_lada_capabilities("lada-cli.exe")
+
+    assert result["ok"] is True
+    assert result["version"] == "Lada: 0.11.0"
+    assert result["capabilities"]["devices"]["values"] == ["cpu", "xpu:0"]
+    assert result["capabilities"]["restoration_models"]["values"] == ["basicvsrpp-v1.2"]
+
+
+def test_lada_encoder_option_discovery_uses_required_encoder_argument(monkeypatch):
+    run = mock.Mock(
+        return_value=mock.Mock(returncode=0, stdout="Options:\n  Name  Type\n  crf   int")
+    )
+    monkeypatch.setattr("lada_agent.lada_client.subprocess.run", run)
+
+    result = discover_lada_encoder_options("lada-cli.exe", "libx264")
+
+    assert result["ok"] is True
+    assert result["values"] == ["crf"]
+    assert run.call_args.args[0] == [
+        "lada-cli.exe",
+        "--list-encoder-options",
+        "libx264",
+    ]
+
+
+def test_lada_capabilities_api_uses_unsaved_cli_path(web_config, monkeypatch):
+    web_config()
+    probe = mock.Mock(
+        return_value={
+            "ok": True,
+            "cli_path": "next-lada.exe",
+            "version": "Lada: 0.11.0",
+            "version_error": "",
+            "capabilities": {},
+        }
+    )
+    monkeypatch.setattr(web_app, "discover_lada_capabilities", probe)
+
+    response = web_app.app.test_client().post(
+        "/api/lada/capabilities", json={"lada_cli_path": "next-lada.exe"}
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["success"] is True
+    probe.assert_called_once_with("next-lada.exe")
+
+
+def test_web_command_preview_uses_unsaved_options(web_config):
+    web_config()
+    response = web_app.app.test_client().post(
+        "/api/lada/command-preview",
+        json={
+            "config": {
+                "lada_cli_path": "lada-cli",
+                "lada_options": {
+                    "device": "cuda:0",
+                    "extra_cli_args": "--device cpu",
+                },
+            },
+            "input": "/srv/input.mp4",
+            "output": "/srv/output.mp4",
+        },
+    )
+
+    data = response.get_json()
+    assert response.status_code == 200
+    assert data["success"] is True
+    assert data["argv"][-2:] == ["--device", "cpu"]
+    assert data["overrides"] == ["--device"]
+
+
+def test_web_diagnostics_accepts_unsaved_config(web_config, monkeypatch):
+    web_config()
+    diagnose = mock.Mock(return_value={"status": "pass", "checks": [], "headless": True})
+    monkeypatch.setattr(web_app, "diagnose_environment", diagnose)
+
+    response = web_app.app.test_client().post(
+        "/api/lada/diagnostics",
+        json={"config": {"lada_cli_path": "next-lada"}},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["headless"] is True
+    assert diagnose.call_args.args[0]["lada_cli_path"] == "next-lada"
+
+
+def test_manual_profile_task_is_restricted_to_monitored_files(tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    video = input_dir / "movie.mp4"
+    video.write_bytes(b"video")
+
+    candidate = mock.Mock()
+    candidate.config = {
+        "monitor_directories": [str(input_dir)],
+        "lada_profiles": {"cpu-safe": {"device": "cpu"}},
+    }
+    monkeypatch.setattr(web_app, "monitor", candidate)
+    monkeypatch.setattr(web_app, "is_monitoring", True)
+    monkeypatch.setattr(web_app, "reconcile_monitor_state", lambda: True)
+
+    response = web_app.app.test_client().post(
+        "/api/tasks/enqueue",
+        json={"path": str(video), "profile": "cpu-safe"},
+    )
+
+    assert response.status_code == 200
+    candidate.submit_file.assert_called_once_with(str(video), "cpu-safe")
 
 
 def test_remote_access_requires_configured_token(web_config):
@@ -146,6 +521,31 @@ def test_start_rejects_while_previous_monitor_has_active_work(monkeypatch):
     assert success is False
     assert "仍在完成任务" in message
     create_monitor.assert_not_called()
+
+
+def test_start_validation_blocks_failed_preflight(tmp_path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    candidate = mock.Mock()
+    candidate.config = {
+        "monitor_directories": [str(input_dir)],
+        "lada_cli_path": sys.executable,
+        "preflight_on_start": True,
+    }
+    candidate.run_preflight.return_value = {
+        "status": "fail",
+        "checks": [
+            {
+                "status": "fail",
+                "message": "encoder unavailable",
+            }
+        ],
+    }
+
+    error = web_app._validate_monitor_start(candidate)
+
+    assert "encoder unavailable" in error
+    candidate.run_preflight.assert_called_once_with()
 
 
 def test_session_secret_persists_across_loads(tmp_path, monkeypatch):
@@ -376,6 +776,41 @@ class LadaAgentCoreTests(unittest.TestCase):
 
             self.assertEqual(output, str(output_dir / "movie.clean.mp4"))
             self.assertNotIn("--output-file-pattern", command)
+            self.close_monitor_logger()
+
+    def test_directory_profile_overrides_global_options_for_matching_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / "input"
+            nested_dir = input_dir / "cpu"
+            nested_dir.mkdir(parents=True)
+            config_path = self.write_config(
+                tmp,
+                self.minimal_config(
+                    tmp,
+                    monitor_directories=[str(input_dir)],
+                    lada_options={"device": "cuda:0"},
+                    lada_profiles={
+                        "cpu-safe": {"device": "cpu", "fp16": False},
+                        "one-off": {"fp16": True},
+                    },
+                    directory_profiles={str(nested_dir): "cpu-safe"},
+                ),
+            )
+            monitor = LadaMonitor(config_path)
+            self.addCleanup(self.close_monitor_logger)
+
+            options, profile = monitor._lada_options_for_file(str(nested_dir / "movie.mp4"))
+
+            self.assertEqual(profile, "cpu-safe")
+            self.assertEqual(options["device"], "cpu")
+            self.assertFalse(options["fp16"])
+
+            task_path = str(nested_dir / "manual.mp4")
+            monitor.queued_profiles[monitor._path_key(task_path)] = "one-off"
+            options, profile = monitor._lada_options_for_file(task_path)
+            self.assertEqual(profile, "cpu-safe → one-off")
+            self.assertEqual(options["device"], "cpu")
+            self.assertTrue(options["fp16"])
             self.close_monitor_logger()
 
     def test_file_hash_is_reused_while_stat_signature_is_unchanged(self):

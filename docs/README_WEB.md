@@ -1,6 +1,6 @@
 # lada-agent · Web 管理界面
 
-> 适用版本：`lada-agent 0.2.0`。Web UI 由 Flask + Flask-SocketIO 提供，静态资源已经随 wheel/EXE 打包，不依赖公网 CDN。
+> 适用版本：`lada-agent 0.3.0`。Web UI 由 Flask + Flask-SocketIO 提供，静态资源已经随 wheel/EXE 打包，不依赖公网 CDN。
 
 Web 界面用于查看处理队列、控制内置 monitor、维护配置、检查历史视频并对比 Original 与 Restored。它不是独立媒体编辑器，也不会在清理历史记录时删除视频文件。
 
@@ -28,6 +28,9 @@ uv run lada-web --host 0.0.0.0 --port 5000
 ```
 
 Windows 也可以运行 `scripts\start_web.bat`。
+
+无显示器 Linux 可以运行 `scripts/start_web_unix.sh`。Web/monitor 不需要 `DISPLAY`，
+`packaging/systemd/lada-agent-web.service` 可作为 systemd user service 模板。
 
 ## 2. 页面与数据含义
 
@@ -82,7 +85,9 @@ Swipe compare 说明：
 
 ### Settings
 
-设置分为 System、Restoration、Detection、Encoding、Paths 和 Uptime Kuma 六组。保存时后端会通过 `sanitize_config_update` 做字段白名单、类型和边界检查。
+设置包括 System、Runtime verification、Restoration、Detection、Encoding、Paths、Uptime Kuma、Advanced CLI override 和 Task parameter templates。保存时后端会通过 `sanitize_config_update` 做字段白名单、类型和边界检查。
+
+Runtime verification 可以运行环境诊断、预览最终 argv，并以监控目录中的现有视频执行异步短样本冒烟。参数模板可以按目录自动生效，也可以用于手工提交的一次任务。`preflight_on_start` 默认开启，明确不可用的设备、模型、preset、encoder 或路径会阻止 monitor 启动。
 
 注意：`max_clip_length` 的单位是**帧**，不是秒。`mp4_fast_start` 只是把对应选项传给 LADA，最终 MP4 布局仍受编码器和容器实现影响。
 

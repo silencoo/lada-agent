@@ -1,0 +1,17 @@
+[Unit]
+Description=LADA Agent headless Web service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/lada_agent
+Environment=LADA_AGENT_CONFIG=%h/lada_agent/config/config.json
+Environment=LADA_AGENT_HOST=127.0.0.1
+Environment=LADA_AGENT_PORT=5000
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env sh %h/lada_agent/scripts/start_web_unix.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
