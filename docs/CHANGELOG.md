@@ -4,6 +4,27 @@ lada-agent 的可见变更记录。格式遵循 [Keep a Changelog](https://keepa
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-31
+
+### Added
+- Web/Tk 设置页增加 Lada CLI 能力探测，动态读取设备、模型、编码 preset、encoder 和 encoder options。
+- 增加 `lada_options.extra_cli_args` 高级覆盖层，参数最后追加且不经过 shell；任务输入输出和信息类命令受保护。
+- 增加 Lada 0.11 参数契约测试，覆盖 auto 默认值、FP16 三态、布尔负向 flag、覆盖优先级和输出模板校验。
+- 增加无头环境诊断、启动前 preflight、结构化版本兼容状态和最终 argv 预览。
+- 增加显式短视频冒烟测试：FFmpeg 截取临时样本、真实调用 Lada、ffprobe 验证输出。
+- 冒烟测试增加可配置的分辨率和帧率上限，默认 640px/5fps，`0` 可保留源规格。
+- 增加 `lada_profiles`、`directory_profiles` 和 Web 单次模板任务提交。
+- 增加 Linux Web 启动脚本及 systemd user unit 示例。
+
+### Changed
+- 包版本提升至 0.3.0，默认可执行文件名改为跨平台的 `lada-cli`。
+
+### Fixed
+- 默认设备和编码 preset 改为 `auto`，不再破坏 Intel XPU/QSV、CPU 或开发版 MPS 的上游动态选择。
+- FP16 开启和关闭均显式传参；输出模式强制每输入唯一占位符与扩展名。
+- 修正“检测脸部马赛克”的界面语义，并同步 Lada 支持的视频扩展名。
+- Web API 不再把自定义检测/修复模型长路径截断到 128 字符。
+
 ## [0.2.0] - 2026-07-18
 
 ### Added

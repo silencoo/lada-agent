@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 LADA视频文件自动监控和处理程序
-自动监控指定目录，发现新视频文件后调用lada-cli.exe进行demosaic处理
+自动监控指定目录，发现新视频文件后调用 lada-cli 进行 demosaic 处理
 """
 
 import hashlib
@@ -25,8 +25,11 @@ from lada_agent.config_manager import (
     load_config,
     resolve_runtime_path,
     resolve_runtime_paths,
+    validate_config,
 )
+from lada_agent.diagnostics import diagnose_environment
 from lada_agent.instance_lock import MonitorInstanceLock
+from lada_agent.lada_client import build_lada_command, format_lada_command, validate_lada_options
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -48,6 +51,7 @@ class LadaMonitor:
         self.processing_files: set[str] = set()
         self.processing_queue: list[str] = []
         self.processing_progress: dict[str, int] = {}
+        self.queued_profiles: dict[str, str] = {}
         self.is_processing = False
         self.should_stop = False
         self.max_concurrent_processes = 1
@@ -69,6 +73,8 @@ class LadaMonitor:
         self.candidate_executor: ThreadPoolExecutor | None = None
         self.logger = logging.getLogger("LadaMonitor")
         self.instance_lock: MonitorInstanceLock | None = None
+        self.last_preflight_report: dict | None = None
+        self._preflight_completed = False
         self.config = self._load_config(config_path)
         print(f"配置加载完成: {bool(self.config)}")
 
@@ -274,19 +280,49 @@ class LadaMonitor:
             return os.path.normpath(configured)
         return os.path.join(os.path.dirname(file_path), self._output_dir_name())
 
-    def _output_path_for_file(self, file_path: str) -> str:
+    def _directory_profile_for_file(self, file_path: str) -> str | None:
+        mappings = self.config.get("directory_profiles") or {}
+        if not isinstance(mappings, dict):
+            return None
+        file_key = self._path_key(file_path)
+        matches: list[tuple[int, str]] = []
+        for directory, profile_name in mappings.items():
+            try:
+                directory_key = self._path_key(str(directory))
+                if os.path.commonpath([file_key, directory_key]) == directory_key:
+                    matches.append((len(directory_key), str(profile_name)))
+            except (OSError, ValueError):
+                continue
+        return max(matches, default=(0, ""))[1] or None
+
+    def _lada_options_for_file(self, file_path: str) -> tuple[dict, str | None]:
+        key = self._path_key(file_path)
+        with self.queue_lock:
+            task_profile = self.queued_profiles.get(key)
+        directory_profile = self._directory_profile_for_file(file_path)
+        options = dict(self.config.get("lada_options") or {})
+        applied_profiles: list[str] = []
+        for profile_name in (directory_profile, task_profile):
+            if not profile_name or profile_name in applied_profiles:
+                continue
+            profiles = self.config.get("lada_profiles") or {}
+            overrides = profiles.get(profile_name)
+            if not isinstance(overrides, dict):
+                raise ValueError(f"Lada 参数模板不存在或无效: {profile_name}")
+            options.update(overrides)
+            applied_profiles.append(profile_name)
+        errors = validate_lada_options(options)
+        if errors:
+            raise ValueError("；".join(errors))
+        return options, " → ".join(applied_profiles) or None
+
+    def _output_path_for_file(self, file_path: str, options: dict | None = None) -> str:
         path = Path(file_path)
         pattern = str(
-            self.config.get("lada_options", {}).get("output_file_pattern")
+            (options or self.config.get("lada_options", {})).get("output_file_pattern")
             or "{orig_file_name}.restored.mp4"
         )
-        try:
-            output_name = pattern.format(orig_file_name=path.stem)
-        except (KeyError, ValueError):
-            output_name = f"{path.stem}.restored.mp4"
-        output_name = os.path.basename(output_name.strip())
-        if not output_name:
-            output_name = f"{path.stem}.restored.mp4"
+        output_name = pattern.format(orig_file_name=path.stem).strip()
         return os.path.join(self._output_dir_for_file(file_path), output_name)
 
     def _output_file_keywords(self) -> list[str]:
@@ -358,6 +394,10 @@ class LadaMonitor:
         self.config_path = resolved_path
         if not config:
             print(f"配置文件不存在或无法加载: {resolved_path}")
+            return {}
+        errors = validate_config(config)
+        if errors:
+            print(f"Lada 参数配置无效: {'；'.join(errors)}")
             return {}
         return config
 
@@ -548,22 +588,22 @@ class LadaMonitor:
                 return True
         return False
 
-    def _candidate_output_names(self, file_path: str) -> set[str]:
+    def _candidate_output_names(self, file_path: str, options: dict | None = None) -> set[str]:
         path = Path(file_path)
         names = {
-            os.path.basename(self._output_path_for_file(file_path)),
+            os.path.basename(self._output_path_for_file(file_path, options)),
             f"{path.stem}_demosaic{path.suffix}",
             f"{path.stem}.restored{path.suffix}",
             f"{path.stem}.restored.mp4",
         }
         return {name.lower() for name in names}
 
-    def _find_existing_output(self, file_path: str) -> str | None:
+    def _find_existing_output(self, file_path: str, options: dict | None = None) -> str | None:
         output_dir = self._output_dir_for_file(file_path)
         if not os.path.isdir(output_dir):
             return None
 
-        exact_names = self._candidate_output_names(file_path)
+        exact_names = self._candidate_output_names(file_path, options)
         for existing_file in os.listdir(output_dir):
             existing_path = os.path.join(output_dir, existing_file)
             if not os.path.isfile(existing_path):
@@ -598,7 +638,8 @@ class LadaMonitor:
         try:
             if self._has_recorded_path(file_path):
                 return True
-            if self._find_existing_output(file_path) is not None:
+            options, _profile_name = self._lada_options_for_file(file_path)
+            if self._find_existing_output(file_path, options) is not None:
                 return True
             file_hash = self._get_file_hash(file_path)
             if file_hash:
@@ -637,56 +678,16 @@ class LadaMonitor:
                     return True
         return False
 
-    def _build_lada_command(self, input_file: str, output_file: str) -> list[str]:
+    def _build_lada_command(
+        self, input_file: str, output_file: str, options: dict | None = None
+    ) -> list[str]:
         """构建lada-cli命令"""
-        opts = self.config.get("lada_options", {})
-        cmd = [self.config["lada_cli_path"], "--input", input_file, "--output", output_file]
-
-        # General
-        if opts.get("device"):
-            cmd.extend(["--device", opts["device"]])
-
-        # FP16 (default True)
-        if not opts.get("fp16", True):
-            cmd.append("--no-fp16")
-
-        # Export (Encoding)
-        # Priority: Encoder > Preset
-        if opts.get("encoder"):
-            cmd.extend(["--encoder", opts["encoder"]])
-            if opts.get("encoder_options"):
-                # encoder_options might be a string like "-crf 20"
-                # We need to treat it carefully. If it's passed as a single string argument:
-                cmd.extend(["--encoder-options", opts["encoder_options"]])
-        elif opts.get("encoding_preset"):
-            cmd.extend(["--encoding-preset", opts["encoding_preset"]])
-
-        # Fast Start
-        if opts.get("mp4_fast_start"):
-            cmd.append("--mp4-fast-start")
-
-        # Restoration
-        if opts.get("mosaic_restoration_model"):
-            cmd.extend(["--mosaic-restoration-model", opts["mosaic_restoration_model"]])
-
-        if opts.get("max_clip_length"):
-            cmd.extend(["--max-clip-length", str(opts["max_clip_length"])])
-
-        # Detection
-        if opts.get("mosaic_detection_model"):
-            cmd.extend(["--mosaic-detection-model", opts["mosaic_detection_model"]])
-
-        if opts.get("detect_face_mosaics"):
-            cmd.append("--detect-face-mosaics")
-
-        # Advanced / Paths
-        if opts.get("temporary_directory"):
-            cmd.extend(["--temporary-directory", opts["temporary_directory"]])
-
-        if opts.get("mosaic_restoration_config_path"):
-            cmd.extend(["--mosaic-restoration-config-path", opts["mosaic_restoration_config_path"]])
-
-        return cmd
+        return build_lada_command(
+            self.config["lada_cli_path"],
+            input_file,
+            output_file,
+            options or self.config.get("lada_options", {}),
+        )
 
     def _process_video_file(self, file_path: str):
         """处理单个视频文件"""
@@ -701,6 +702,9 @@ class LadaMonitor:
                 return
 
         file_name = os.path.basename(file_path)
+        options, profile_name = self._lada_options_for_file(file_path)
+        with self.queue_lock:
+            self.queued_profiles.pop(self._path_key(file_path), None)
 
         # 动态生成输出目录：[InputFileDir]/Restored
         output_dir = self._output_dir_for_file(file_path)
@@ -714,9 +718,9 @@ class LadaMonitor:
             return
 
         # 输出文件路径
-        output_path = self._output_path_for_file(file_path)
+        output_path = self._output_path_for_file(file_path, options)
 
-        existing_output = self._find_existing_output(file_path)
+        existing_output = self._find_existing_output(file_path, options)
         if existing_output:
             self.logger.info(f"输出文件已存在，跳过处理: {file_path} (输出文件: {existing_output})")
             print(
@@ -748,16 +752,22 @@ class LadaMonitor:
         # 发送Web事件
         self._emit_web_event(
             "processing_started",
-            {"file": file_name, "path": file_path, "time": datetime.now().isoformat()},
+            {
+                "file": file_name,
+                "path": file_path,
+                "profile": profile_name or "global",
+                "time": datetime.now().isoformat(),
+            },
         )
 
         # 构建命令
-        cmd = self._build_lada_command(file_path, output_path)
+        cmd = self._build_lada_command(file_path, output_path, options)
 
         try:
             print("⚙️  执行LADA处理命令...")
-            print(f"📋 命令: {' '.join(cmd)}")
-            self.logger.info(f"执行命令: {' '.join(cmd)}")
+            display_command = format_lada_command(cmd)
+            print(f"📋 命令: {display_command}")
+            self.logger.info(f"执行命令: {display_command}")
 
             # 执行命令并实时显示输出
             print("\n🚀 开始处理，实时输出:")
@@ -893,26 +903,43 @@ class LadaMonitor:
             self._emit_queue_updated()
             print("🔄 处理完成，继续处理队列中的下一个文件...")
 
-    def process_new_file(self, file_path: str):
+    def process_new_file(self, file_path: str, profile_name: str | None = None):
         """处理新文件"""
         file_path = os.path.normpath(file_path)
+        if profile_name:
+            profiles = self.config.get("lada_profiles") or {}
+            if profile_name not in profiles:
+                raise ValueError(f"不存在 Lada 参数模板: {profile_name}")
+            with self.queue_lock:
+                self.queued_profiles[self._path_key(file_path)] = profile_name
+
+        def discard_profile():
+            with self.queue_lock:
+                self.queued_profiles.pop(self._path_key(file_path), None)
+
         if self.should_stop:
+            discard_profile()
             return
 
         # 检查是否是程序输出的文件，避免无限循环
         if self._is_output_file(file_path):
             self.logger.debug(f"跳过程序输出的文件，避免无限循环: {file_path}")
+            discard_profile()
             return
 
         if not self._is_video_file(file_path):
+            discard_profile()
             return
 
         with self.queue_lock:
             if file_path in self.processing_files or file_path in self.processing_queue:
+                discard_profile()
                 return
 
-        if self._has_recorded_path(file_path) or self._find_existing_output(file_path):
+        options, _resolved_profile = self._lada_options_for_file(file_path)
+        if self._has_recorded_path(file_path) or self._find_existing_output(file_path, options):
             self.logger.debug(f"文件已有处理结果，跳过: {file_path}")
+            discard_profile()
             return
 
         # 检查文件是否已就绪
@@ -921,6 +948,7 @@ class LadaMonitor:
             return
 
         if self.should_stop:
+            discard_profile()
             return
 
         self._clear_file_ready_retry(file_path)
@@ -931,9 +959,11 @@ class LadaMonitor:
             self.logger.info(f"文件已处理过，跳过: {file_path}")
             print(f"⏭️  文件已处理过，跳过: {file_name}")
             self._clear_file_ready_retry(file_path)
+            discard_profile()
             return
 
         if self.should_stop:
+            discard_profile()
             return
 
         # 添加到处理队列
@@ -953,8 +983,10 @@ class LadaMonitor:
         if added:
             self._emit_queue_updated()
             self._ensure_queue_workers()
+        else:
+            discard_profile()
 
-    def submit_file(self, file_path: str):
+    def submit_file(self, file_path: str, profile_name: str | None = None):
         """Schedule readiness and identity checks without blocking watchdog callbacks."""
         if self.should_stop or not self.candidate_executor:
             return
@@ -967,7 +999,7 @@ class LadaMonitor:
 
         def check_candidate():
             try:
-                self.process_new_file(normalized)
+                self.process_new_file(normalized, profile_name)
             finally:
                 with self.candidate_lock:
                     self.candidate_paths.discard(key)
@@ -1054,6 +1086,14 @@ class LadaMonitor:
 
     def start_monitoring(self):
         """Start monitoring while holding the cross-process instance lock."""
+        if self.config.get("preflight_on_start", True) and not self._preflight_completed:
+            report = self.run_preflight()
+            if report["status"] == "fail":
+                message = "启动前环境诊断失败；请运行 lada-monitor --diagnose 查看详情"
+                self.logger.error(message)
+                print(f"❌ {message}")
+                self._emit_web_event("monitoring_failed", {"message": message})
+                return False
         if not self.acquire_instance_lock():
             message = "另一个 LADA monitor 已在使用这份配置，拒绝重复启动"
             self.logger.error(message)
@@ -1065,6 +1105,16 @@ class LadaMonitor:
         finally:
             self.release_instance_lock()
         return True
+
+    def run_preflight(self) -> dict:
+        """Run the same headless-safe checks used by the Web diagnostics panel."""
+        report = diagnose_environment(self.config)
+        self.last_preflight_report = report
+        self._preflight_completed = True
+        for check in report.get("checks") or []:
+            log = self.logger.error if check["status"] == "fail" else self.logger.info
+            log(f"启动检查 [{check['status']}] {check['label']}: {check['message']}")
+        return report
 
     def _run_monitoring(self):
         """Run the watcher loop after the caller reserves the instance lock."""

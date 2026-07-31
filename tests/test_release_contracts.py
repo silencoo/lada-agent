@@ -15,8 +15,13 @@ def test_cli_can_initialize_config_without_source_checkout(tmp_path):
     config = json.loads(config_path.read_text(encoding="utf-8"))
 
     assert config["monitor_directories"] == []
-    assert config["lada_cli_path"] == "lada-cli.exe"
+    assert config["lada_cli_path"] == "lada-cli"
     assert config["lada_options"]["max_clip_length"] == 180
+    assert config["lada_options"]["device"] == "auto"
+    assert config["lada_options"]["fp16"] is None
+    assert config["lada_options"]["encoding_preset"] == "auto"
+    assert config["lada_options"]["extra_cli_args"] == ""
+    assert {".asf", ".m4v", ".mpeg", ".mpg", ".ts"} <= set(config["supported_extensions"])
     assert cli.main(["--init-config", "--config", str(config_path)]) == 1
 
 
@@ -49,6 +54,20 @@ def test_web_ui_is_self_contained_and_keeps_video_regression_contracts():
     assert 'id="compareSlider"' in template
     assert 'id="compareFullscreenBtn"' in template
     assert 'id="compareBuffering"' in template
+    assert 'id="probeLadaBtn"' in template
+    assert 'id="extraCliArgs"' in template
+    assert 'id="encoderOptionsHelp"' in template
+    assert 'id="diagnosticsBtn"' in template
+    assert 'id="commandPreview"' in template
+    assert 'id="smokeTestBtn"' in template
+    assert 'id="ladaProfiles"' in template
+    assert 'id="manualTaskPath"' in template
+    assert "probeLadaCapabilities()" in template
+    assert "inspectEncoderOptions()" in template
+    assert "runDiagnostics()" in template
+    assert "previewCommand()" in template
+    assert "startSmokeTest()" in template
+    assert "currentConfig.lada_options.extra_cli_args" in script
     assert "original_available && file.output_available" in script
     assert "setVideoSource('originalVideo', 'originalUnavailable', '')" in script
     assert "setVideoSource('restoredVideo', 'restoredUnavailable', '')" in script
@@ -67,3 +86,7 @@ def test_unix_scripts_use_current_uv_entrypoint():
         assert "requirements.txt" not in script
         assert "src/lada_monitor.py" not in script
         assert "uv run lada-monitor" in script
+
+    web_script = (ROOT / "scripts/start_web_unix.sh").read_text(encoding="utf-8")
+    assert "uv run lada-web" in web_script
+    assert "LADA_AGENT_HOST" in web_script

@@ -9,20 +9,23 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from lada_agent.lada_client import optional_bool, validate_lada_options
+
 DEFAULT_LADA_OPTIONS: dict[str, Any] = {
-    "device": "cuda:0",
-    "fp16": True,
+    "device": "auto",
+    "fp16": None,
     "mosaic_restoration_model": "basicvsrpp-v1.2",
     "max_clip_length": 180,
     "mosaic_detection_model": "v4-fast",
     "detect_face_mosaics": False,
-    "encoding_preset": "hevc-nvidia-gpu-hq",
+    "encoding_preset": "auto",
     "encoder": "",
     "encoder_options": "",
-    "mp4_fast_start": True,
+    "mp4_fast_start": False,
     "temporary_directory": "",
     "output_file_pattern": "{orig_file_name}.restored.mp4",
     "mosaic_restoration_config_path": "",
+    "extra_cli_args": "",
 }
 
 DEFAULT_UPTIME_KUMA: dict[str, Any] = {
@@ -37,14 +40,33 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "monitor_directories": [],
     # Empty keeps the historical per-input ``Restored`` directory behavior.
     "output_directory": "",
-    "lada_cli_path": "lada-cli.exe",
-    "supported_extensions": [".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm"],
+    # ``lada-cli`` also resolves lada-cli.exe through PATHEXT on Windows.
+    "lada_cli_path": "lada-cli",
+    "supported_extensions": [
+        ".asf",
+        ".avi",
+        ".flv",
+        ".m4v",
+        ".mkv",
+        ".mov",
+        ".mp4",
+        ".mpeg",
+        ".mpg",
+        ".ts",
+        ".wmv",
+        ".webm",
+    ],
     "lada_options": DEFAULT_LADA_OPTIONS,
+    # Named partial option sets. Global lada_options are applied first.
+    "lada_profiles": {},
+    # Map an input directory to a named profile. Longest matching path wins.
+    "directory_profiles": {},
     "scan_interval": 10,
     "processed_files_log": "../data/processed_files.json",
     "log_level": "INFO",
     "log_file": "../logs/lada_monitor.log",
     "max_concurrent_processes": 2,
+    "preflight_on_start": True,
     "auto_start": True,
     "move_processed_files": False,
     "processed_files_destination": "",
@@ -60,19 +82,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 LADA_OPTION_SCHEMA = {
-    "device": ("str", "cuda:0", 128),
-    "fp16": ("bool", True, None),
-    "mosaic_restoration_model": ("str", "", 128),
+    "device": ("str", "auto", 128),
+    "fp16": ("optional_bool", None, None),
+    "mosaic_restoration_model": ("str", "", 1000),
     "max_clip_length": ("int", 180, 86400),
-    "mosaic_detection_model": ("str", "", 128),
+    "mosaic_detection_model": ("str", "", 1000),
     "detect_face_mosaics": ("bool", False, None),
-    "encoding_preset": ("str", "", 128),
+    "encoding_preset": ("str", "auto", 256),
     "encoder": ("str", "", 128),
     "encoder_options": ("str", "", 1000),
-    "mp4_fast_start": ("bool", True, None),
+    "mp4_fast_start": ("bool", False, None),
     "temporary_directory": ("str", "", 1000),
     "output_file_pattern": ("str", "{orig_file_name}.restored.mp4", 240),
     "mosaic_restoration_config_path": ("str", "", 1000),
+    "extra_cli_args": ("str", "", 4000),
 }
 
 
@@ -132,6 +155,11 @@ def merge_config(config: dict[str, Any] | None) -> dict[str, Any]:
     uptime_kuma.update(merged.get("uptime_kuma", {}))
     merged["uptime_kuma"] = uptime_kuma
 
+    if not isinstance(merged.get("lada_profiles"), dict):
+        merged["lada_profiles"] = {}
+    if not isinstance(merged.get("directory_profiles"), dict):
+        merged["directory_profiles"] = {}
+
     return merged
 
 
@@ -176,7 +204,31 @@ def atomic_write_json(path: str, data: Any) -> None:
                 pass
 
 
+def validate_config(config: dict[str, Any]) -> list[str]:
+    errors = validate_lada_options(config.get("lada_options"))
+    global_options = config.get("lada_options") or {}
+    profiles = config.get("lada_profiles") or {}
+    if isinstance(profiles, dict):
+        for name, overrides in profiles.items():
+            if not isinstance(overrides, dict):
+                errors.append(f"Lada 参数模板 {name} 必须是对象")
+                continue
+            merged_options = {**global_options, **overrides}
+            errors.extend(
+                f"模板 {name}: {error}" for error in validate_lada_options(merged_options)
+            )
+    directory_profiles = config.get("directory_profiles") or {}
+    if isinstance(directory_profiles, dict):
+        for directory, profile_name in directory_profiles.items():
+            if profile_name not in profiles:
+                errors.append(f"目录 {directory} 引用了不存在的模板 {profile_name}")
+    return list(dict.fromkeys(errors))
+
+
 def save_config(config_path: str, config: dict[str, Any]) -> None:
+    errors = validate_config(config)
+    if errors:
+        raise ValueError("；".join(errors))
     atomic_write_json(config_path, config)
 
 
@@ -209,6 +261,13 @@ def resolve_runtime_paths(config: dict[str, Any], base_dir: str | None = None) -
         value = config.get(key)
         if value and not os.path.isabs(value):
             config[key] = resolve_runtime_path(value, base_dir)
+    directory_profiles = config.get("directory_profiles")
+    if isinstance(directory_profiles, dict):
+        config["directory_profiles"] = {
+            resolve_runtime_path(path, base_dir): profile
+            for path, profile in directory_profiles.items()
+            if path and profile
+        }
     return config
 
 
@@ -291,6 +350,49 @@ def clean_extension_list(value: Any, default: list | None = None) -> list:
     return extensions
 
 
+def _sanitize_lada_options(data: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    for key, value in data.items():
+        if key not in LADA_OPTION_SCHEMA:
+            continue
+        kind, default, limit = LADA_OPTION_SCHEMA[key]
+        if kind == "bool":
+            cleaned[key] = coerce_bool(value)
+        elif kind == "optional_bool":
+            cleaned[key] = optional_bool(value)
+        elif kind == "int":
+            cleaned[key] = coerce_positive_int(value, default, limit)
+        else:
+            cleaned[key] = coerce_string(value, default, limit)
+    if not partial:
+        return {**copy.deepcopy(DEFAULT_LADA_OPTIONS), **cleaned}
+    return cleaned
+
+
+def clean_lada_profiles(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_options in list(value.items())[:32]:
+        name = coerce_string(raw_name, "", 64)
+        if not name or not isinstance(raw_options, dict):
+            continue
+        cleaned[name] = _sanitize_lada_options(raw_options, partial=True)
+    return cleaned
+
+
+def clean_directory_profiles(value: Any, profiles: dict[str, Any]) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, str] = {}
+    for raw_path, raw_profile in list(value.items())[:128]:
+        path = normalize_path(coerce_string(raw_path, "", 1000))
+        profile = coerce_string(raw_profile, "", 64)
+        if path and profile in profiles:
+            cleaned[path] = profile
+    return cleaned
+
+
 def sanitize_config_update(
     data: dict[str, Any], existing_config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -308,6 +410,8 @@ def sanitize_config_update(
         full_config["max_concurrent_processes"] = coerce_positive_int(
             data.get("max_concurrent_processes"), 1, 16
         )
+    if "preflight_on_start" in data:
+        full_config["preflight_on_start"] = coerce_bool(data.get("preflight_on_start"))
     if "file_ready_check_interval" in data:
         full_config["file_ready_check_interval"] = coerce_positive_int(
             data.get("file_ready_check_interval"), 2, 3600
@@ -323,7 +427,7 @@ def sanitize_config_update(
     if "auto_start" in data:
         full_config["auto_start"] = coerce_bool(data.get("auto_start"))
     if "lada_cli_path" in data:
-        full_config["lada_cli_path"] = coerce_string(data.get("lada_cli_path"), "lada-cli.exe")
+        full_config["lada_cli_path"] = coerce_string(data.get("lada_cli_path"), "lada-cli")
     if "web_access_token" in data:
         full_config["web_access_token"] = coerce_string(data.get("web_access_token"), "", 256)
     if "output_directory_name" in data:
@@ -361,15 +465,15 @@ def sanitize_config_update(
         full_config["uptime_kuma"] = uptime
 
     if "lada_options" in data and isinstance(data["lada_options"], dict):
-        for key, value in data["lada_options"].items():
-            if key not in LADA_OPTION_SCHEMA:
-                continue
-            kind, default, limit = LADA_OPTION_SCHEMA[key]
-            if kind == "bool":
-                full_config["lada_options"][key] = coerce_bool(value)
-            elif kind == "int":
-                full_config["lada_options"][key] = coerce_positive_int(value, default, limit)
-            else:
-                full_config["lada_options"][key] = coerce_string(value, default, limit)
+        full_config["lada_options"].update(
+            _sanitize_lada_options(data["lada_options"], partial=True)
+        )
+
+    if "lada_profiles" in data:
+        full_config["lada_profiles"] = clean_lada_profiles(data.get("lada_profiles"))
+    if "directory_profiles" in data:
+        full_config["directory_profiles"] = clean_directory_profiles(
+            data.get("directory_profiles"), full_config.get("lada_profiles", {})
+        )
 
     return full_config

@@ -2,7 +2,9 @@
 
 LADA Agent 是一个面向本地与局域网环境的视频修复任务管理器。它可以持续监控目录，在发现新视频后调用 LADA CLI 执行 demosaic 修复，并通过命令行、桌面界面或 Web 仪表盘管理任务。
 
-当前版本为 `0.2.0`，已验证兼容 LADA CLI `0.10.1`。关于上游版本适配范围，请参阅 [LADA 兼容性说明](docs/LADA_COMPATIBILITY.md)。
+当前版本为 `0.3.0`。参数契约已按 LADA CLI `0.11.0` 源码适配，并兼容当前
+`0.11.1-dev` 的命令行表面；真实 GPU、编码器和视频回归状态见
+[LADA 兼容性说明](docs/LADA_COMPATIBILITY.md)。
 
 ## 核心能力
 
@@ -16,6 +18,9 @@ LADA Agent 是一个面向本地与局域网环境的视频修复任务管理器
 | Web 对比 | 支持状态筛选、历史清理、并排或滑动对比，以及全屏同步播放 |
 | 运行保护 | 同一配置只允许一个 monitor 实例；远程 Web 访问支持 token 和持久化登录会话 |
 | 跨平台脚本 | 提供 Windows 批处理脚本以及 Linux/macOS 启动脚本 |
+| 无头部署 | monitor、Web、诊断和冒烟测试均不依赖桌面显示服务器 |
+| 运行验证 | 启动前检查 Lada 版本、设备、模型、编码器和目录权限；支持最终 argv 预览 |
+| 参数模板 | 全局参数之上可按目录或单次任务应用命名模板 |
 
 ## 系统要求
 
@@ -25,7 +30,7 @@ LADA Agent 是一个面向本地与局域网环境的视频修复任务管理器
 | 包管理器 | [uv](https://github.com/astral-sh/uv)，用于创建虚拟环境和锁定依赖 |
 | LADA CLI | 已安装且可执行；可以加入 `PATH`，也可以在配置中填写完整路径 |
 | 操作系统 | Windows 或 Linux；macOS 可使用 Unix 启动脚本，但 LADA CLI 兼容性取决于上游 |
-| 硬件 | 取决于所选 LADA 模型和编码器；使用 CUDA 时需要兼容的 NVIDIA 驱动 |
+| 硬件 | 取决于 LADA 构建；Agent 的 `auto` 模式支持 Lada 自动选择 NVIDIA CUDA、Intel XPU、CPU，以及开发版的 Apple MPS |
 
 ## 快速开始
 
@@ -57,12 +62,12 @@ uv run lada-monitor --init-config
 {
   "monitor_directories": ["C:\\Downloads\\Videos"],
   "output_directory": "C:\\Downloads\\Restored",
-  "lada_cli_path": "C:\\Tools\\lada-cli.exe",
+  "lada_cli_path": "lada-cli",
   "max_concurrent_processes": 1,
   "lada_options": {
-    "device": "cuda:0",
-    "fp16": true,
-    "encoding_preset": "hevc-nvidia-gpu-hq"
+    "device": "auto",
+    "fp16": null,
+    "encoding_preset": "auto"
   }
 }
 ```
@@ -74,6 +79,15 @@ uv run lada-monitor --init-config
 ```bash
 # 前台运行目录监控；按 Ctrl+C 停止
 uv run lada-monitor
+
+# 无头服务器：检查 Lada、GPU/CPU、编码器和目录权限
+uv run lada-monitor --diagnose
+
+# 只查看最终传给 Lada 的 argv，不执行
+uv run lada-monitor --preview /srv/videos/sample.mp4 --profile cpu-safe
+
+# 截取 3 秒临时样本并执行真实 Lada/ffprobe 回归
+uv run lada-monitor --smoke-test /srv/videos/sample.mp4 --smoke-max-width 640 --smoke-max-fps 5
 
 # 启动仅本机可访问的 Web 管理界面
 uv run lada-web --host 127.0.0.1 --port 5000
@@ -127,9 +141,26 @@ uv run lada-web --host 0.0.0.0 --port 5000
 
 ### LADA 选项
 
-常用字段包括 `device`、`fp16`、`encoding_preset`、`mosaic_restoration_model`、`mosaic_detection_model`、`max_clip_length` 和 `detect_face_mosaics`。
+常用字段包括 `device`、`fp16`、`encoding_preset`、`mosaic_restoration_model`、`mosaic_detection_model`、`max_clip_length` 和 `detect_face_mosaics`。Web/Tk 设置页可以调用已配置的 Lada CLI，动态读取设备、模型、preset、encoder 和 encoder options。
 
 `encoder` 与 `encoder_options` 用于自定义 FFmpeg 编码参数，并优先于 `encoding_preset`。`max_clip_length` 的单位是帧，不是秒。Web API 仅接受 `config_manager.LADA_OPTION_SCHEMA` 中声明的字段，并会对数值执行边界检查。
+
+`device: "auto"`、`encoding_preset: "auto"` 和 `fp16: null` 表示不覆盖 Lada 自身的硬件感知默认值。`extra_cli_args` 是最后追加的高级命令行覆盖层，可承载未来 Lada 新参数；它不经过 shell，并禁止覆盖 Agent 管理的 `--input`、`--output`、输出文件模式和信息类命令。
+
+`lada_profiles` 保存命名的部分参数模板，`directory_profiles` 把输入目录映射到模板。实际合并顺序为“全局 `lada_options` → 最长目录匹配模板 → 单次手工任务模板 → `extra_cli_args`”。
+
+## 无显示器 Linux
+
+可以运行。`lada-monitor` 和 `lada-web` 不导入 Tk，也不需要 `DISPLAY`/Wayland。推荐先运行：
+
+```bash
+uv run lada-monitor --diagnose
+scripts/start_web_unix.sh
+```
+
+Web 默认只监听 `127.0.0.1`，可通过 SSH 隧道访问；确需局域网监听时设置 `LADA_AGENT_HOST=0.0.0.0` 并配置访问 token。`packaging/systemd/` 提供 systemd user unit 示例。Web 的 `auto_start=true` 已经会同时运行 monitor，因此不要再并行启用独立 monitor unit。
+
+Lada 官方 Linux CLI 可来自源码安装、Flatpak 或 Docker。Flatpak/Docker 调用包含额外宿主机参数时，请建立一个接收 `"$@"` 的 wrapper 脚本，并把 `lada_cli_path` 指向该脚本；模型、输入、输出和临时目录都必须映射为容器/沙箱可访问的相同路径。
 
 所有字段、默认值和迁移说明见 [详细使用指南](docs/usage.md)。
 
@@ -149,18 +180,19 @@ Linux/macOS：
 ```bash
 scripts/start_unix.sh
 scripts/start_daemon_unix.sh
+scripts/start_web_unix.sh
 ```
 
 后台脚本的日志和 PID 文件会写入 `logs/`。
 
 ## 处理流程
 
-1. 读取并验证配置，获取该配置对应的单实例锁。
-2. 启动 Watchdog 监听并执行一次恢复扫描。
-3. 等待候选文件大小稳定，过滤临时文件和程序输出文件。
-4. 检查处理记录，避免重复入队。
-5. 按并发上限调用 LADA CLI。
-6. 保存处理结果、日志和历史记录。
+1. 读取配置并执行 Lada、硬件、编码器、模型和路径 preflight。
+2. 获取该配置对应的单实例锁。
+3. 启动 Watchdog 监听并执行一次恢复扫描。
+4. 等待候选文件大小稳定，过滤临时文件和程序输出文件。
+5. 检查处理记录，合并目录/单次参数模板，避免重复入队。
+6. 按并发上限调用 LADA CLI，并保存处理结果、日志和历史记录。
 
 ## 开发与验证
 

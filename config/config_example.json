@@ -4,36 +4,50 @@
     "D:\\Torrents"
   ],
   "output_directory": "C:\\Downloads\\Restored",
-  "lada_cli_path": "C:\\Tools\\lada-cli.exe",
+  "lada_cli_path": "lada-cli",
   "supported_extensions": [
+    ".asf",
+    ".flv",
+    ".m4v",
     ".mp4",
     ".avi",
     ".mkv",
     ".mov",
     ".wmv",
-    ".flv",
+    ".mpeg",
+    ".mpg",
+    ".ts",
     ".webm"
   ],
   "lada_options": {
-    "device": "cuda:0",
-    "fp16": true,
+    "device": "auto",
+    "fp16": null,
     "mosaic_restoration_model": "basicvsrpp-v1.2",
     "max_clip_length": 180,
     "mosaic_detection_model": "v4-fast",
     "detect_face_mosaics": false,
-    "encoding_preset": "hevc-nvidia-gpu-hq",
+    "encoding_preset": "auto",
     "encoder": "",
     "encoder_options": "",
     "mp4_fast_start": false,
     "temporary_directory": "",
     "output_file_pattern": "{orig_file_name}.restored.mp4",
-    "mosaic_restoration_config_path": ""
+    "mosaic_restoration_config_path": "",
+    "extra_cli_args": ""
   },
+  "lada_profiles": {
+    "cpu-safe": {
+      "device": "cpu",
+      "fp16": false
+    }
+  },
+  "directory_profiles": {},
   "scan_interval": 10,
   "processed_files_log": "../data/processed_files.json",
   "log_level": "INFO",
   "log_file": "../logs/lada_monitor.log",
   "max_concurrent_processes": 2,
+  "preflight_on_start": true,
   "auto_start": true,
   "move_processed_files": false,
   "processed_files_destination": "",

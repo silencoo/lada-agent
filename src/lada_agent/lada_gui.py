@@ -12,6 +12,7 @@ from lada_agent.config_manager import (
     sanitize_config_update,
 )
 from lada_agent.config_manager import save_config as write_config
+from lada_agent.lada_client import discover_lada_capabilities
 
 # Import the monitor logic
 from lada_agent.lada_monitor import LadaMonitor
@@ -49,9 +50,10 @@ class LadaGUI:
         self.var_auto_start = tk.BooleanVar(value=self.config.get("auto_start", False))
 
         # LADA Options
-        self.var_cli_path = tk.StringVar(value=self.config.get("lada_cli_path", "lada-cli.exe"))
-        self.var_device = tk.StringVar(value=self.lada_options.get("device", "cuda:0"))
-        self.var_fp16 = tk.BooleanVar(value=self.lada_options.get("fp16", True))
+        self.var_cli_path = tk.StringVar(value=self.config.get("lada_cli_path", "lada-cli"))
+        self.var_device = tk.StringVar(value=self.lada_options.get("device") or "auto")
+        fp16 = self.lada_options.get("fp16")
+        self.var_fp16 = tk.StringVar(value="auto" if fp16 is None else ("on" if fp16 else "off"))
 
         # Restoration
         self.var_restoration_model = tk.StringVar(
@@ -69,17 +71,21 @@ class LadaGUI:
 
         # Encoding
         self.var_encoding_preset = tk.StringVar(
-            value=self.lada_options.get("encoding_preset", "hevc-nvidia-gpu-hq")
+            value=self.lada_options.get("encoding_preset") or "auto"
         )
         self.var_encoder = tk.StringVar(value=self.lada_options.get("encoder", ""))
         self.var_encoder_options = tk.StringVar(value=self.lada_options.get("encoder_options", ""))
-        self.var_fast_start = tk.BooleanVar(value=self.lada_options.get("mp4_fast_start", True))
+        self.var_fast_start = tk.BooleanVar(value=self.lada_options.get("mp4_fast_start", False))
 
         # Advanced
         self.var_temp_dir = tk.StringVar(value=self.lada_options.get("temporary_directory", ""))
         self.var_output_pattern = tk.StringVar(
             value=self.lada_options.get("output_file_pattern", "{orig_file_name}.restored.mp4")
         )
+        self.var_restoration_config = tk.StringVar(
+            value=self.lada_options.get("mosaic_restoration_config_path", "")
+        )
+        self.var_extra_cli_args = tk.StringVar(value=self.lada_options.get("extra_cli_args", ""))
 
         # Uptime Kuma
         self.var_uptime_enabled = tk.BooleanVar(value=self.uptime_kuma.get("enabled", False))
@@ -340,6 +346,17 @@ class LadaGUI:
             font=self.font_base,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
         self._add_entry(sys_frame, "LADA CLI Path:", self.var_cli_path, 3, width=46)
+        self.probe_lada_button = tk.Button(
+            sys_frame,
+            text="Detect Lada Options",
+            command=self.probe_lada_capabilities,
+            bg="#dce9e2",
+            relief=tk.FLAT,
+            font=self.font_small,
+            padx=10,
+            pady=5,
+        )
+        self.probe_lada_button.grid(row=4, column=0, columnspan=2, sticky="w", pady=5, padx=6)
 
         # --- General & Restoration ---
         res_frame = tk.LabelFrame(
@@ -353,16 +370,16 @@ class LadaGUI:
         )
         res_frame.pack(fill=tk.X, pady=(0, 15))
 
-        self._add_entry(res_frame, "Device (e.g. cuda:0):", self.var_device, 0)
-        self._add_entry(res_frame, "Restoration Model:", self.var_restoration_model, 1)
+        self.device_combo = self._add_combo(
+            res_frame, "Device:", self.var_device, 0, ["auto", "cpu", "cuda:0", "xpu:0", "mps"]
+        )
+        self.restoration_model_combo = self._add_combo(
+            res_frame, "Restoration Model / Path:", self.var_restoration_model, 1, []
+        )
         self._add_entry(res_frame, "Max Clip Length:", self.var_max_clip_length, 2)
-        tk.Checkbutton(
-            res_frame,
-            text="Use FP16 (Reduce VRAM)",
-            variable=self.var_fp16,
-            bg="#f0f2f5",
-            font=self.font_base,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+        self._add_combo(
+            res_frame, "FP16 Inference:", self.var_fp16, 3, ["auto", "on", "off"], readonly=True
+        )
 
         # --- Detection ---
         det_frame = tk.LabelFrame(
@@ -376,10 +393,12 @@ class LadaGUI:
         )
         det_frame.pack(fill=tk.X, pady=(0, 15))
 
-        self._add_entry(det_frame, "Detection Model:", self.var_detection_model, 0)
+        self.detection_model_combo = self._add_combo(
+            det_frame, "Detection Model / Path:", self.var_detection_model, 0, []
+        )
         tk.Checkbutton(
             det_frame,
-            text="Detect Face Mosaics",
+            text="Ignore detected face mosaics (model v3+)",
             variable=self.var_detect_face,
             bg="#f0f2f5",
             font=self.font_base,
@@ -397,7 +416,9 @@ class LadaGUI:
         )
         enc_frame.pack(fill=tk.X, pady=(0, 15))
 
-        self._add_entry(enc_frame, "Encoding Preset:", self.var_encoding_preset, 0, width=40)
+        self.encoding_preset_combo = self._add_combo(
+            enc_frame, "Encoding Preset:", self.var_encoding_preset, 0, ["auto"], width=40
+        )
         tk.Label(
             enc_frame,
             text="(OR Use Custom Encoder below)",
@@ -406,7 +427,9 @@ class LadaGUI:
             font=self.font_small,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=5)
 
-        self._add_entry(enc_frame, "Encoder Name (e.g. libx265):", self.var_encoder, 2)
+        self.encoder_combo = self._add_combo(
+            enc_frame, "Encoder Name (e.g. libx265):", self.var_encoder, 2, []
+        )
         self._add_entry(
             enc_frame, "Encoder Options (e.g. -crf 20):", self.var_encoder_options, 3, width=40
         )
@@ -434,6 +457,21 @@ class LadaGUI:
             adv_frame, "Temp Directory (Optional):", self.var_temp_dir, 0, is_dir=True
         )
         self._add_entry(adv_frame, "Output File Pattern:", self.var_output_pattern, 1, width=40)
+        self._add_path_entry(
+            adv_frame,
+            "Restoration Config (Optional):",
+            self.var_restoration_config,
+            2,
+            is_dir=False,
+        )
+        self._add_entry(adv_frame, "Advanced CLI Override:", self.var_extra_cli_args, 3, width=40)
+        tk.Label(
+            adv_frame,
+            text="Appended last; input/output and list commands stay protected.",
+            bg="#f0f2f5",
+            fg="#64748b",
+            font=self.font_small,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=6)
 
         # --- Uptime Kuma ---
         uptime_frame = tk.LabelFrame(
@@ -479,9 +517,54 @@ class LadaGUI:
         tk.Label(parent, text=label_text, bg="#f0f2f5", anchor="w", font=self.font_base).grid(
             row=row, column=0, sticky="w", pady=6, padx=6
         )
-        tk.Entry(parent, textvariable=variable, width=width, font=self.font_base).grid(
-            row=row, column=1, sticky="w", pady=6, padx=6
+        entry = tk.Entry(parent, textvariable=variable, width=width, font=self.font_base)
+        entry.grid(row=row, column=1, sticky="w", pady=6, padx=6)
+        return entry
+
+    def _add_combo(self, parent, label_text, variable, row, values, width=34, readonly=False):
+        tk.Label(parent, text=label_text, bg="#f0f2f5", anchor="w", font=self.font_base).grid(
+            row=row, column=0, sticky="w", pady=6, padx=6
         )
+        combo = ttk.Combobox(
+            parent,
+            textvariable=variable,
+            values=values,
+            width=width,
+            state="readonly" if readonly else "normal",
+            font=self.font_base,
+        )
+        combo.grid(row=row, column=1, sticky="w", pady=6, padx=6)
+        return combo
+
+    def probe_lada_capabilities(self):
+        self.probe_lada_button.configure(state=tk.DISABLED, text="Detecting…")
+
+        def worker():
+            result = discover_lada_capabilities(self.var_cli_path.get().strip() or "lada-cli")
+            self.root.after(0, lambda: self._apply_lada_capabilities(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_lada_capabilities(self, result):
+        capabilities = result.get("capabilities", {})
+
+        def values(name, include_auto=False):
+            discovered = capabilities.get(name, {}).get("values", [])
+            return list(dict.fromkeys((["auto"] if include_auto else []) + discovered))
+
+        self.device_combo.configure(values=values("devices", True))
+        self.restoration_model_combo.configure(values=values("restoration_models"))
+        self.detection_model_combo.configure(values=values("detection_models"))
+        self.encoding_preset_combo.configure(values=values("encoding_presets", True))
+        self.encoder_combo.configure(values=values("encoders"))
+        self.probe_lada_button.configure(state=tk.NORMAL, text="Detect Lada Options")
+        if result.get("ok"):
+            messagebox.showinfo("Lada detected", result.get("version") or "Options loaded")
+        else:
+            messagebox.showerror(
+                "Lada detection failed",
+                result.get("version_error") or "Check the configured Lada CLI path.",
+            )
 
     def _add_path_entry(self, parent, label_text, variable, row, is_dir=True):
         tk.Label(parent, text=label_text, bg="#f0f2f5", anchor="w", font=self.font_base).grid(
@@ -535,8 +618,9 @@ class LadaGUI:
             if "lada_options" not in self.config:
                 self.config["lada_options"] = {}
 
-            self.config["lada_options"]["device"] = self.var_device.get().strip()
-            self.config["lada_options"]["fp16"] = self.var_fp16.get()
+            self.config["lada_options"]["device"] = self.var_device.get().strip() or "auto"
+            fp16_mode = self.var_fp16.get()
+            self.config["lada_options"]["fp16"] = None if fp16_mode == "auto" else fp16_mode == "on"
 
             # Restoration
             self.config["lada_options"]["mosaic_restoration_model"] = (
@@ -551,7 +635,9 @@ class LadaGUI:
             self.config["lada_options"]["detect_face_mosaics"] = self.var_detect_face.get()
 
             # Encoding
-            self.config["lada_options"]["encoding_preset"] = self.var_encoding_preset.get().strip()
+            self.config["lada_options"]["encoding_preset"] = (
+                self.var_encoding_preset.get().strip() or "auto"
+            )
             self.config["lada_options"]["encoder"] = self.var_encoder.get().strip()
             self.config["lada_options"]["encoder_options"] = self.var_encoder_options.get().strip()
             self.config["lada_options"]["mp4_fast_start"] = self.var_fast_start.get()
@@ -561,6 +647,10 @@ class LadaGUI:
             self.config["lada_options"]["output_file_pattern"] = (
                 self.var_output_pattern.get().strip()
             )
+            self.config["lada_options"]["mosaic_restoration_config_path"] = (
+                self.var_restoration_config.get().strip()
+            )
+            self.config["lada_options"]["extra_cli_args"] = self.var_extra_cli_args.get().strip()
 
             # Uptime Kuma
             if "uptime_kuma" not in self.config:

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlsplit
 
@@ -32,8 +33,16 @@ from lada_agent.config_manager import (
 from lada_agent.config_manager import (
     resolve_config_path as shared_resolve_config_path,
 )
-
-# 导入原有的监控程序
+from lada_agent.diagnostics import (
+    diagnose_environment,
+    merge_lada_options_for_path,
+    run_lada_smoke_test,
+)
+from lada_agent.lada_client import (
+    build_lada_command_preview,
+    discover_lada_capabilities,
+    discover_lada_encoder_options,
+)
 from lada_agent.lada_monitor import LadaMonitor
 
 
@@ -165,6 +174,8 @@ processing_timing_lock = threading.RLock()
 monitor_state_lock = threading.RLock()
 history_lock = threading.RLock()
 config_lock = threading.RLock()
+smoke_test_lock = threading.RLock()
+smoke_test_state: dict = {"status": "idle"}
 
 
 def _file_size(path):
@@ -311,6 +322,27 @@ def _overview_metrics(queue, processing, progress, processed_items):
 def resolve_config_path() -> str:
     """定位配置文件路径"""
     return shared_resolve_config_path()
+
+
+def _request_config(data: dict | None = None) -> tuple[dict, str]:
+    config_path = resolve_config_path()
+    config, _ = load_config(config_path)
+    if data:
+        config = sanitize_config_update(data, config)
+    resolve_runtime_paths(config, base_dir=os.path.dirname(config_path))
+    return config, config_path
+
+
+def _path_is_monitored(path: str, config: dict) -> bool:
+    target = os.path.normcase(os.path.abspath(path))
+    for directory in config.get("monitor_directories") or []:
+        root = os.path.normcase(os.path.abspath(directory))
+        try:
+            if os.path.commonpath([target, root]) == root:
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
 
 
 def _is_loopback_peer() -> bool:
@@ -504,6 +536,15 @@ def _validate_monitor_start(candidate) -> str | None:
         and not shutil.which(lada_path)
     ):
         return f"无法在当前目录或PATH中找到 LADA CLI: {lada_path}"
+    if candidate.config.get("preflight_on_start", True):
+        report = candidate.run_preflight()
+        if report["status"] == "fail":
+            failed = [
+                check["message"]
+                for check in report.get("checks") or []
+                if check["status"] == "fail"
+            ]
+            return "启动前诊断失败: " + "；".join(failed[:3])
     return None
 
 
@@ -865,9 +906,12 @@ def api_get_config():
             "output_directory": config.get("output_directory", ""),
             "scan_interval": config.get("scan_interval", 10),
             "max_concurrent_processes": config.get("max_concurrent_processes", 1),
+            "preflight_on_start": config.get("preflight_on_start", True),
             "auto_start": config.get("auto_start", False),
-            "lada_cli_path": config.get("lada_cli_path", "lada-cli.exe"),
+            "lada_cli_path": config.get("lada_cli_path", "lada-cli"),
             "lada_options": config.get("lada_options", {}),
+            "lada_profiles": config.get("lada_profiles", {}),
+            "directory_profiles": config.get("directory_profiles", {}),
             "uptime_kuma": config.get("uptime_kuma", {}),
         }
     )
@@ -900,8 +944,168 @@ def api_update_config():
             monitor_thread = None
 
         return jsonify({"success": True, "message": "配置已更新"})
+    except ValueError as e:
+        return jsonify({"success": False, "message": f"配置校验失败: {str(e)}"}), 400
     except Exception as e:
         return jsonify({"success": False, "message": f"更新配置失败: {str(e)}"})
+
+
+@app.route("/api/lada/capabilities", methods=["POST"])
+def api_lada_capabilities():
+    """Probe values exposed by the configured Lada CLI list commands."""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "请求体必须是JSON对象"}), 400
+    config, _ = load_config(resolve_config_path())
+    cli_path = str(data.get("lada_cli_path") or config.get("lada_cli_path") or "lada-cli")
+    cli_path = cli_path.strip()[:1000] or "lada-cli"
+    result = discover_lada_capabilities(cli_path)
+    return jsonify(
+        {
+            "success": result["ok"],
+            "message": "Lada 能力探测完成" if result["ok"] else "无法完整探测 Lada CLI",
+            **result,
+        }
+    )
+
+
+@app.route("/api/lada/encoder-options", methods=["POST"])
+def api_lada_encoder_options():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "请求体必须是JSON对象"}), 400
+    config, _ = load_config(resolve_config_path())
+    cli_path = str(data.get("lada_cli_path") or config.get("lada_cli_path") or "lada-cli")
+    encoder = str(data.get("encoder") or "").strip()
+    result = discover_lada_encoder_options(cli_path.strip()[:1000], encoder)
+    return jsonify({"success": result["ok"], **result})
+
+
+@app.route("/api/lada/command-preview", methods=["POST"])
+def api_lada_command_preview():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "请求体必须是JSON对象"}), 400
+    try:
+        incoming_config = data.get("config") if isinstance(data.get("config"), dict) else data
+        config, _ = _request_config(incoming_config)
+        input_path = str(data.get("input") or "/data/input/sample.mp4")
+        options, applied_profiles = merge_lada_options_for_path(
+            config, input_path, str(data.get("profile") or "").strip() or None
+        )
+        preview = build_lada_command_preview(
+            str(config.get("lada_cli_path") or "lada-cli"),
+            input_path,
+            str(data.get("output") or "/data/output/sample.restored.mp4"),
+            options,
+        )
+        return jsonify({"success": True, "profiles": applied_profiles, **preview})
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+
+
+@app.route("/api/lada/diagnostics", methods=["POST"])
+def api_lada_diagnostics():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "请求体必须是JSON对象"}), 400
+    incoming_config = data.get("config") if isinstance(data.get("config"), dict) else data
+    config, _ = _request_config(incoming_config)
+    report = diagnose_environment(config)
+    return jsonify({"success": report["status"] != "fail", **report})
+
+
+@app.route("/api/lada/smoke-test", methods=["GET", "POST"])
+def api_lada_smoke_test():
+    global smoke_test_state
+    if request.method == "GET":
+        with smoke_test_lock:
+            return jsonify(dict(smoke_test_state))
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "请求体必须是JSON对象"}), 400
+    config, _ = _request_config()
+    input_path = os.path.abspath(
+        os.path.expanduser(os.path.expandvars(str(data.get("input_path") or "")))
+    )
+    if not os.path.isfile(input_path):
+        return jsonify({"success": False, "message": "样本视频不存在"}), 400
+    if not _path_is_monitored(input_path, config):
+        return jsonify({"success": False, "message": "样本必须位于已配置的监控目录内"}), 400
+    if _monitor_has_active_work(monitor):
+        return jsonify({"success": False, "message": "请等待当前处理队列空闲后再运行冒烟测试"}), 409
+    profile = str(data.get("profile") or "").strip() or None
+    try:
+        _options, applied_profiles = merge_lada_options_for_path(config, input_path, profile)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+
+    with smoke_test_lock:
+        if smoke_test_state.get("status") == "running":
+            return jsonify({"success": False, "message": "已有冒烟测试正在运行"}), 409
+        smoke_test_state = {
+            "status": "running",
+            "success": None,
+            "input_path": input_path,
+            "profile": " → ".join(applied_profiles) or "global",
+            "started_at": datetime.now().isoformat(),
+        }
+
+    def worker():
+        global smoke_test_state
+        try:
+            result = run_lada_smoke_test(
+                config,
+                input_path,
+                profile_name=profile,
+                seconds=data.get("seconds", 3),
+                max_width=data.get("max_width", 640),
+                max_fps=data.get("max_fps", 5),
+                timeout=data.get("timeout", 1800),
+            )
+            state = {
+                "status": "passed" if result["success"] else "failed",
+                **result,
+                "input_path": input_path,
+                "started_at": smoke_test_state.get("started_at"),
+                "finished_at": datetime.now().isoformat(),
+            }
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Lada smoke test failed")
+            state = {
+                "status": "failed",
+                "success": False,
+                "message": str(exc),
+                "input_path": input_path,
+                "profile": profile or "global",
+                "finished_at": datetime.now().isoformat(),
+            }
+        with smoke_test_lock:
+            smoke_test_state = state
+
+    threading.Thread(target=worker, daemon=True, name="lada-smoke-test").start()
+    return jsonify({**smoke_test_state, "accepted": True, "message": "冒烟测试已启动"}), 202
+
+
+@app.route("/api/tasks/enqueue", methods=["POST"])
+def api_enqueue_task():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "请求体必须是JSON对象"}), 400
+    reconcile_monitor_state()
+    if not monitor or not is_monitoring or not monitor.config:
+        return jsonify({"success": False, "message": "请先启动监控"}), 409
+    file_path = os.path.abspath(os.path.expanduser(os.path.expandvars(str(data.get("path") or ""))))
+    if not os.path.isfile(file_path):
+        return jsonify({"success": False, "message": "任务文件不存在"}), 400
+    if not _path_is_monitored(file_path, monitor.config):
+        return jsonify({"success": False, "message": "任务文件必须位于监控目录内"}), 400
+    profile = str(data.get("profile") or "").strip() or None
+    if profile and profile not in (monitor.config.get("lada_profiles") or {}):
+        return jsonify({"success": False, "message": f"不存在参数模板: {profile}"}), 400
+    monitor.submit_file(file_path, profile)
+    return jsonify({"success": True, "message": "任务已提交", "profile": profile or "global"})
 
 
 @app.route("/api/open_path", methods=["POST"])

@@ -10,7 +10,7 @@
 
 - **Python 3.12+**(由 `pyproject.toml` 的 `requires-python` 锁定)
 - **[uv](https://github.com/astral-sh/uv)** —— 包管理与虚拟环境一体化,跨平台
-- **[LADA CLI](https://github.com/ladaapp/lada)** —— `lada-cli.exe` 单独发布,`lada-agent` 通过子进程调用它;**不**包含在本项目里
+- **[LADA CLI](https://github.com/ladaapp/lada)** —— `lada-cli` 单独安装,`lada-agent` 通过子进程调用它;**不**包含在本项目里
 
 > 如果你从老版本(<0.1.0)升级,跳过"安装步骤",直接看 [§5 迁移指南](#5-迁移指南)。
 
@@ -79,7 +79,7 @@ cp config/config_example.json config/config.json
 # 用任意编辑器填写以下三项实际值:
 #   - monitor_directories      要监控的视频目录列表
 #   - output_directory         可选的统一输出目录；留空则在输入目录下使用 Restored
-#   - lada_cli_path            lada-cli.exe 的绝对路径
+#   - lada_cli_path            lada-cli、lada-cli.exe 或宿主机 wrapper 的路径
 ```
 
 也可以跨平台执行 `uv run lada-monitor --init-config`。该命令由代码默认值生成完整配置，因此通过 wheel 安装时也不依赖源码仓库里的示例文件。
@@ -128,6 +128,134 @@ uv run --group dev pytest tests/test_core.py::LadaAgentCoreTests::test_unready_f
 uv run --group dev ruff check .
 uv run --group dev ruff format --check .
 ```
+
+### 3.7 Lada 参数与高级覆盖
+
+Web 设置页的 **Detect Lada options** 和 Tk 面板的 **Detect Lada Options** 会执行当前
+Lada CLI 的 `--version` 与全部 `--list-*` 信息命令，填充设备、模型、编码 preset 和
+encoder 候选值。自定义模型路径和未被列出的值仍可手工输入。
+
+推荐保留硬件感知默认值：
+
+```json
+{
+  "lada_options": {
+    "device": "auto",
+    "fp16": null,
+    "encoding_preset": "auto",
+    "mosaic_restoration_model": "basicvsrpp-v1.2",
+    "max_clip_length": 180,
+    "mosaic_detection_model": "v4-fast",
+    "detect_face_mosaics": false,
+    "mp4_fast_start": false,
+    "extra_cli_args": ""
+  }
+}
+```
+
+- `auto`/`null` 会省略对应 flag，让当前 Lada 构建按 CUDA、XPU、MPS 或 CPU 能力选择。
+- FP16 选择 On/Off 时会明确传 `--fp16`/`--no-fp16`，不再依赖上游默认值。
+- `detect_face_mosaics` 的真实含义是检测并排除脸部马赛克，避免把脸部区域送去修复。
+- 输出模式必须包含 `{orig_file_name}` 和扩展名，防止多个输入写入同一路径。
+- `encoder_options` 只有与 `encoder` 同时填写才有效；自定义 encoder 优先于 preset。
+
+`extra_cli_args` 会作为参数数组追加到标准参数之后，因此可以覆盖设备、精度、模型或编码
+设置，也能承载未来版本新增的处理参数，例如：
+
+```json
+{
+  "extra_cli_args": "--device cpu --no-fp16"
+}
+```
+
+出于任务一致性考虑，高级覆盖不能使用 `--input`、`--output`、`--output-file-pattern`、
+`--help`、`--version` 或任何 `--list-*` 参数。这些信息类操作由能力探测接口提供。
+
+### 3.8 无头诊断、命令预览与真实冒烟
+
+以下命令都不需要桌面显示服务器：
+
+```bash
+# 检查 Lada 版本、设备、编码器、模型、目录权限和 FFmpeg
+uv run lada-monitor --diagnose
+
+# JSON 输出，适合部署脚本或健康检查
+uv run lada-monitor --diagnose --json
+
+# 显示最终 argv；高级覆盖会在末尾，命令不会执行
+uv run lada-monitor --preview /srv/videos/sample.mp4
+
+# 截取最多 3 秒临时视频，真实调用 Lada，再用 ffprobe 验证输出
+uv run lada-monitor --smoke-test /srv/videos/sample.mp4 --smoke-seconds 3 \
+  --smoke-max-width 640 --smoke-max-fps 5
+
+# 显式保留冒烟产物
+uv run lada-monitor --smoke-test /srv/videos/sample.mp4 \
+  --smoke-max-width 0 \
+  --smoke-max-fps 0 \
+  --smoke-output /srv/videos/sample.smoke.restored.mp4
+```
+
+默认 `preflight_on_start=true`。每次启动 monitor 前会执行同一套关键检查；Lada、设备、
+编码器、已选模型/预设或路径不可用时拒绝启动。FFmpeg/ffprobe 只用于短样本测试，缺失时
+是警告，不会阻止正常监控。
+
+Web 设置页的 **Runtime verification** 提供同样的诊断、最终 argv 预览和异步冒烟测试。
+Web 冒烟输入必须位于已配置的监控目录，临时样本及默认测试输出会在验证结束后删除。
+
+### 3.9 参数模板与单次任务
+
+`lada_profiles` 中每个模板都是 `lada_options` 的部分覆盖。`directory_profiles` 的 key 是
+目录，value 是模板名；多层路径同时匹配时使用最长路径。示例：
+
+```json
+{
+  "lada_profiles": {
+    "cpu-safe": {"device": "cpu", "fp16": false},
+    "nvidia-hq": {"device": "cuda:0", "encoding_preset": "hevc-nvidia-gpu-hq"}
+  },
+  "directory_profiles": {
+    "/srv/videos/cpu": "cpu-safe",
+    "/srv/videos/hq": "nvidia-hq"
+  }
+}
+```
+
+Web 设置页还可以把一个现有文件按指定模板提交为单次任务。文件必须位于监控目录，且
+monitor 已启动。最终优先级为：全局设置、目录模板、单次模板、高级 CLI 覆盖。
+
+### 3.10 无显示器 Linux 服务
+
+Agent 的 Web/monitor 路径不导入 Tkinter；没有 `DISPLAY` 或 Wayland 也能运行：
+
+```bash
+scripts/start_web_unix.sh
+
+# 或仅运行 monitor
+scripts/start_daemon_unix.sh
+```
+
+`packaging/systemd/` 包含 systemd user unit 示例，默认仓库位置为
+`~/lada_agent`。复制到 `~/.config/systemd/user/` 后可启用其中一个：
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now lada-agent-web.service
+```
+
+Web 配置 `auto_start=true` 时自身会启动 monitor，不要再同时启用
+`lada-agent-monitor.service`。SSH 服务器推荐保持 `127.0.0.1` 并使用端口转发；监听
+`0.0.0.0` 时必须设置 `LADA_AGENT_ACCESS_TOKEN` 并配合 HTTPS 反向代理。
+
+Flatpak 可创建 wrapper，例如：
+
+```sh
+#!/usr/bin/env sh
+exec flatpak run --filesystem=host --command=lada-cli io.github.ladaapp.lada "$@"
+```
+
+将 wrapper 设为可执行，并把 `lada_cli_path` 指向其绝对路径。Docker wrapper 同样必须
+透传 `"$@"`，并将全部监控、输出、模型和临时路径 bind mount 到容器中的相同路径。
 
 ---
 
@@ -191,7 +319,7 @@ lada-xyz = "lada_agent.xyz:main"
 | `uv sync` 卡在网络 | PyPI 不可达 | `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync` |
 | Web 启动时 `Address already in use` | 端口被占 | 换 `--port` |
 | 远程访问 401 | 缺 token | 设 `LADA_AGENT_ACCESS_TOKEN` 或在 `config.json` 加 `web_access_token` |
-| `lada-cli.exe` 子进程启动失败 | 路径错或模型权重未下载 | 用绝对路径,先单独跑一次 `lada-cli --list-devices` 验证 |
+| `lada-cli` 子进程启动失败 | 路径错、wrapper 权限错误或模型权重未下载 | 运行 `lada-monitor --diagnose` |
 | Tk GUI 起不来 | 系统 Python 没装 `tk` | 装 `python.org` 的官方发行版,或 `apt install python3-tk` |
 
 更多问题追踪见 [`README_WEB.md` 末尾的故障排查](README_WEB.md#故障排查) 和 [`AUDIT_2026-05-12.md`](AUDIT_2026-05-12.md) 里曾踩到的坑。
