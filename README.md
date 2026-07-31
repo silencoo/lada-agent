@@ -1,5 +1,7 @@
 # LADA Agent
 
+简体中文 | [English](README.en.md)
+
 LADA Agent 是一个面向本地与局域网环境的视频修复任务管理器。它可以持续监控目录，在发现新视频后调用 LADA CLI 执行 demosaic 修复，并通过命令行、桌面界面或 Web 仪表盘管理任务。
 
 当前版本为 `0.3.0`。参数契约已按 LADA CLI `0.11.0` 源码适配，并兼容当前
@@ -32,6 +34,110 @@ LADA Agent 是一个面向本地与局域网环境的视频修复任务管理器
 | 操作系统 | Windows 或 Linux；macOS 可使用 Unix 启动脚本，但 LADA CLI 兼容性取决于上游 |
 | 硬件 | 取决于 LADA 构建；Agent 的 `auto` 模式支持 Lada 自动选择 NVIDIA CUDA、Intel XPU、CPU，以及开发版的 Apple MPS |
 
+## 安装 LADA CLI
+
+LADA Agent **不包含** Lada 模型和运行时。克隆本仓库后，仍需单独安装
+[Lada](https://github.com/ladaapp/lada)，并让 `lada_cli_path` 指向可执行的
+`lada-cli`。不要只复制单个 `lada-cli.exe`：Windows standalone 包还依赖同目录的
+`_internal/` 和其他文件。
+
+### Windows：Lada v0.11.0 NVIDIA/CPU
+
+NVIDIA RTX 20/30/40/50 系列应使用官方 v0.11.0 NVIDIA standalone 包；同一包也可以通过
+`--device cpu` 在 x86-64 CPU 上运行，但会明显更慢。Intel Arc 用户应改用发布页中的
+`lada-v0.11.0_windows_intel.7z`。请以
+[Lada v0.11.0 发布页](https://github.com/ladaapp/lada/releases/tag/v0.11.0)为准。
+
+GitHub 上的 NVIDIA 包因大小限制分成两段，二者必须下载到同一目录。以下命令把约
+2.50 GB 的下载内容放在仓库外，避免误提交：
+
+```powershell
+$LadaDownload = Join-Path $env:TEMP "lada-v0.11.0-windows-nvidia"
+New-Item -ItemType Directory -Force -Path $LadaDownload | Out-Null
+
+gh release download v0.11.0 `
+  --repo ladaapp/lada `
+  --pattern "lada-v0.11.0_windows_nvidia.7z.*" `
+  --dir $LadaDownload
+```
+
+也可以从发布页手工下载这两个文件：
+
+```text
+lada-v0.11.0_windows_nvidia.7z.001
+lada-v0.11.0_windows_nvidia.7z.002
+```
+
+下载后校验 SHA256；输出必须与下列官方值完全一致：
+
+```powershell
+Get-FileHash "$LadaDownload\lada-v0.11.0_windows_nvidia.7z.001" -Algorithm SHA256
+Get-FileHash "$LadaDownload\lada-v0.11.0_windows_nvidia.7z.002" -Algorithm SHA256
+```
+
+```text
+861caf4bc3fb08bb4f145a0ef53172d051d39401e9f5b1c6cbab7206b32e518b  .001
+472b8012f676cca0ef0eb6af9a69ba1256370dbe6c1c84740ab34d4c2650b796  .002
+```
+
+安装 [7-Zip](https://www.7-zip.org/) 后，只需打开或解压 `.001`，7-Zip 会自动读取
+同目录的 `.002`：
+
+```powershell
+$SevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+& $SevenZip x `
+  "$LadaDownload\lada-v0.11.0_windows_nvidia.7z.001" `
+  "-o$LadaDownload\extracted"
+```
+
+在仓库根目录执行以下命令。旧运行时先移到仓库外作为回滚备份，再把完整的 `lada`
+目录放到被 `.gitignore` 忽略的 `cli/`：
+
+```powershell
+if (Test-Path .\cli) {
+  Move-Item .\cli "$LadaDownload\cli-previous-backup"
+}
+Move-Item "$LadaDownload\extracted\lada" .\cli
+```
+
+最终结构必须至少包含：
+
+```text
+lada-agent/
+├─ cli/
+│  ├─ lada-cli.exe
+│  ├─ lada.exe
+│  └─ _internal/
+├─ config/
+└─ src/
+```
+
+在 `config/config.json` 中使用相对于配置目录的路径，克隆到其他位置后仍可工作：
+
+```json
+{
+  "lada_cli_path": "../cli/lada-cli.exe"
+}
+```
+
+验证版本、CPU/CUDA 设备和 Agent 环境：
+
+```powershell
+.\cli\lada-cli.exe --version
+.\cli\lada-cli.exe --list-devices
+uv run lada-monitor --diagnose
+```
+
+版本应为 `0.11.0`；NVIDIA 主机通常应同时列出 `cpu` 和 `cuda:0`。
+
+### Linux 无头服务器
+
+不要在 Linux 上放置 Windows standalone 包。使用上游支持的源码安装、Flatpak 或 Docker，
+再创建一个透传 `"$@"` 的 `lada-cli` wrapper，并把 `lada_cli_path` 指向该 wrapper。容器或
+Flatpak 必须能以相同路径访问输入、输出、模型和临时目录。完整示例见
+[详细使用指南：无显示器 Linux 服务](docs/usage.md#310-无显示器-linux-服务)和
+[Lada 官方安装说明](https://github.com/ladaapp/lada#installation)。
+
 ## 快速开始
 
 ### 1. 获取源码并安装依赖
@@ -62,7 +168,7 @@ uv run lada-monitor --init-config
 {
   "monitor_directories": ["C:\\Downloads\\Videos"],
   "output_directory": "C:\\Downloads\\Restored",
-  "lada_cli_path": "lada-cli",
+  "lada_cli_path": "../cli/lada-cli.exe",
   "max_concurrent_processes": 1,
   "lada_options": {
     "device": "auto",
