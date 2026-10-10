@@ -149,9 +149,11 @@ def test_named_profiles_are_sanitized_and_directory_assignments_are_validated(tm
 def test_environment_diagnostics_pass_in_headless_linux_shape(tmp_path, monkeypatch):
     input_dir = tmp_path / "input"
     input_dir.mkdir()
+    cli_path = tmp_path / "lada-cli"
+    cli_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    monkeypatch.setattr(diagnostics, "resolve_lada_executable", lambda _value: "/bin/lada-cli")
     monkeypatch.setattr(
         diagnostics,
         "discover_lada_capabilities",
@@ -174,13 +176,13 @@ def test_environment_diagnostics_pass_in_headless_linux_shape(tmp_path, monkeypa
         {
             "monitor_directories": [str(input_dir)],
             "output_directory": str(tmp_path / "output"),
-            "lada_cli_path": "lada-cli",
+            "lada_cli_path": str(cli_path),
             "lada_options": {"temporary_directory": str(tmp_path)},
         }
     )
 
     assert report["headless"] is True
-    assert report["status"] == "pass"
+    assert report["status"] == "pass", report["checks"]
     assert {check["id"] for check in report["checks"]} >= {
         "headless",
         "lada-cli",
